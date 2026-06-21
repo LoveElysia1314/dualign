@@ -1,0 +1,135 @@
+[
+  {
+    "name": "ok",
+    "description": "Confirm the current snap is semantically parallel and needs no changes. The system will finalize it as a correct 1:1 pair.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "snap_id": {
+          "type": "integer",
+          "description": "Snap index."
+        }
+      },
+      "required": ["snap_id"]
+    }
+  },
+  {
+    "name": "edit",
+    "description": "Replace original text for one side or both sides of one or more consecutive snaps. Operates on INITIAL state. Prefer modifying only the needed side; omit the other. If both new_src and new_tgt are provided, their arrays must have identical length (each pair becomes a 1:1 snap). Use snap_range 'i-j' to edit a continuous block.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "snap_range": {
+          "type": "string",
+          "description": "Snap index (e.g., '7') or range (e.g., '10-13')."
+        },
+        "new_src": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "New source lines. Omit to keep original source unchanged."
+        },
+        "new_tgt": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "New target lines. Omit to keep original target unchanged."
+        }
+      },
+      "required": ["snap_range"]
+    }
+  },
+  {
+    "name": "merge",
+    "description": "Merge multiple source lines into one paragraph and multiple target lines into one paragraph, producing a single 1:1 snap. Both sides are merged simultaneously (not selectively). Supports snap_range for consecutive snaps. Do NOT merge when each source line is a complete, independent sentence — use ok instead for clean N:N splits.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "snap_range": {
+          "type": "string",
+          "description": "Snap index or range (e.g., '10-13')."
+        }
+      },
+      "required": ["snap_range"]
+    }
+  },
+  {
+    "name": "delete",
+    "description": "Remove one or more snaps entirely. Supports snap_range for consecutive deletion.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "snap_range": {
+          "type": "string",
+          "description": "Snap index or range (e.g., '10-13')."
+        }
+      },
+      "required": ["snap_range"]
+    }
+  },
+  {
+    "name": "flag",
+    "description": "Mark a snap for human review. Provide a note explaining the difficulty.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "snap_id": { "type": "integer" },
+        "note": {
+          "type": "string",
+          "description": "Reason for flagging."
+        }
+      },
+      "required": ["snap_id", "note"]
+    }
+  },
+  {
+    "name": "view",
+    "description": "Retrieve full JSON content of specified snaps (both initial and current text). Use to inspect details when ±3 context is insufficient.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pair_spec": {
+          "type": "string",
+          "description": "Comma-separated indices or ranges, e.g., '1-3,5,11'."
+        }
+      },
+      "required": ["pair_spec"]
+    }
+  },
+  {
+    "name": "append",
+    "description": "Add a newly discovered problematic snap to the review list for a later round. Only use when you cannot resolve it immediately with edit/merge/delete.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "snap_id": { "type": "integer" }
+      },
+      "required": ["snap_id"]
+    }
+  },
+  {
+    "name": "done",
+    "description": "Finalize the review. ONLY use when ALL flagged snaps have been processed (ok/edit/merge/delete/flag). If called with unprocessed snaps remaining, the system will reject and list them. Append 'done' as an ADDITIONAL tool call in the SAME response as your last review action—do not wait for a follow-up prompt. Example: if you are calling ok(38), add done after it in the same tool_calls array. If you have a legitimate reason to skip remaining items, use force_done instead.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "note": {
+          "type": "string",
+          "description": "Optional closing note."
+        }
+      }
+    }
+  },
+  {
+    "name": "force_done",
+    "description": "Force-finalize the review even if some flagged snaps remain unprocessed. Use only when you have a legitimate reason to skip remaining items (e.g., duplicates that don't need individual review, or systemic non-translation content already handled). A note explaining why is required.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "note": {
+          "type": "string",
+          "description": "Required explanation of why remaining items are being skipped."
+        }
+      },
+      "required": ["note"]
+    }
+  }
+]

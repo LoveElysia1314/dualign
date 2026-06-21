@@ -1,0 +1,10 @@
+[flake8]
+max-line-length = 120
+extend-ignore = E203
+per-file-ignores =
+    src/dualign/gui/window.py: E402
+    src/dualign/gui/window_actions.py: E401, E303
+    src/dualign/gui/window_table.py: E303
+    src/dualign/gui/workspace.py: E401
+    src/dualign/models/__init__.py: F401
+    src/dualign/gui/__init__.py: F401

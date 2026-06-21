@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dualign"
+version = "0.7.0"
+description = "双语平行文档对齐与辅助校验工具"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Dualign Contributors"}
+]
+
+# ═══════════════════════════════════════════════════════════
+# 核心依赖 — 对齐引擎 + CLI + AI 审校 + 格式化
+# ═══════════════════════════════════════════════════════════
+dependencies = [
+    "numpy>=1.24",        # 核心 DP 对齐算法
+    "requests>=2.28",     # Ollama / API 嵌入编码调用
+    "cryptography>=41",   # API Key Fernet 加密存储
+    "openai>=1.0.0",      # DeepSeek AI 审校代理
+    "mdformat>=0.7.17",   # Markdown 输出格式化
+    "PySide6>=6.5",       # 交互式对齐审校工作台
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/dualign"
+Repository = "https://github.com/your-org/dualign"
+
+[project.scripts]
+dualign = "dualign.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ═══════════════════════════════════════════════════════════════
+# 代码质量工具配置
+# ═══════════════════════════════════════════════════════════════
+
+[tool.vulture]
+exclude = ["tests/", "demo/", "scripts/"]
+paths = ["src/dualign"]
+ignore_names = [
+    "paintEvent", "dragEnterEvent", "dropEvent",
+    "showEvent", "contextMenuEvent",
+]
+
+[tool.flake8]
+max-line-length = 120
+extend-ignore = ["E203"]
+# 注：per-file-ignores 在 .flake8 中配置
+# （pyproject.toml 下行格式 flake8 7.x 支持有限）
