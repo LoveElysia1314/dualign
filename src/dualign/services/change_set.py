@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from difflib import unified_diff
+import difflib
 import json
 from typing import Iterable
 
@@ -18,47 +18,53 @@ LEGACY_ONLY_ACTION_KINDS = frozenset(
 )
 
 
-def _affected_operations(action: RepairAction) -> tuple[int, ...]:
-    raw = action.data.get("orig_snaps") or [action.op_index]
-    result: list[int] = []
-    for value in raw:
-        try:
-            operation = int(value)
-        except (TypeError, ValueError):
-            continue
-        if operation not in result:
-            result.append(operation)
-    return tuple(result)
-
-
-def _is_manually_reviewed(action: RepairAction) -> bool:
-    approvals = action.data.get("approvals", ())
-    if isinstance(approvals, str):
-        approvals = {approvals}
-    return "manual" in approvals or action.source == "user"
+def _format_range_unified(start: int, stop: int) -> str:
+    beginning = start + 1
+    length = stop - start
+    if length == 1:
+        return str(beginning)
+    if not length:
+        beginning -= 1
+    return f"{beginning},{length}"
 
 
 def _diff(before: str, after: str, before_name: str, after_name: str) -> str:
+    """行级 unified diff（autojunk=False）。
+
+    与 solidify._diff 同一算法：关闭 difflib 的 autojunk 启发式，避免长文档
+    中重复行导致整段错位。
+    """
     if before == after:
         return ""
-    return "".join(
-        unified_diff(
-            before.splitlines(keepends=True),
-            after.splitlines(keepends=True),
-            fromfile=before_name,
-            tofile=after_name,
-        )
+    before_lines = before.splitlines(keepends=True)
+    after_lines = after.splitlines(keepends=True)
+    matcher = difflib.SequenceMatcher(
+        a=before_lines, b=after_lines, autojunk=False
     )
+    out = [f"--- {before_name}\n", f"+++ {after_name}\n"]
+    for group in matcher.get_grouped_opcodes(3):
+        first, last = group[0], group[-1]
+        out.append(
+            f"@@ -{_format_range_unified(first[1], last[2])} "
+            f"+{_format_range_unified(first[3], last[4])} @@\n"
+        )
+        for tag, i1, i2, j1, j2 in group:
+            if tag == "equal":
+                out.extend(" " + line for line in before_lines[i1:i2])
+            elif tag in {"replace", "delete"}:
+                out.extend("-" + line for line in before_lines[i1:i2])
+            if tag in {"replace", "insert"}:
+                out.extend("+" + line for line in after_lines[j1:j2])
+    return "".join(out)
 
 
 @dataclass(frozen=True)
 class PairChangeSet:
-    """Computed work state plus the evidence required before source overwrite."""
+    """Computed work state plus the evidence required before solidification."""
 
     baseline: PairEditingState
     working: PairEditingState
     actions: tuple[RepairAction, ...]
-    unreviewed_content_operations: tuple[int, ...]
     content_action_count: int
     relation_action_count: int
     legacy_only_action_count: int
@@ -90,7 +96,7 @@ class PairChangeSet:
 
     @property
     def can_apply(self) -> bool:
-        return self.has_content_changes and not self.unreviewed_content_operations
+        return self.has_content_changes
 
     @property
     def has_changes(self) -> bool:
@@ -137,29 +143,19 @@ class PairChangeSet:
 def build_pair_change_set(
     baseline: PairEditingState, repair_log: Iterable[RepairAction]
 ) -> PairChangeSet:
-    """Replay recovery actions and derive the human-review gate.
+    """Replay recovery actions and derive the work-state change set.
 
-    A manual content edit is reviewed at creation.  Automatic/agent content
-    edits remain blocked until a later manual ``ok`` covers every affected
-    operation.  Pending AI proposals are not in ``repair_log`` and therefore
-    correctly do not count as accepted changes.
+    Pending AI proposals are not in ``repair_log`` and therefore correctly
+    do not count as accepted changes.
     """
 
     actions = tuple(repair_log)
-    pending: set[int] = set()
     content_count = relation_count = legacy_count = 0
     for action in actions:
-        affected = set(_affected_operations(action))
         if action.kind in CONTENT_ACTION_KINDS:
             content_count += 1
-            if _is_manually_reviewed(action):
-                pending.difference_update(affected)
-            else:
-                pending.update(affected)
         elif action.kind in RELATION_ACTION_KINDS:
             relation_count += 1
-            if action.kind == "ok" and _is_manually_reviewed(action):
-                pending.difference_update(affected)
         elif action.kind in LEGACY_ONLY_ACTION_KINDS:
             legacy_count += 1
 
@@ -168,7 +164,6 @@ def build_pair_change_set(
         baseline=baseline,
         working=working,
         actions=actions,
-        unreviewed_content_operations=tuple(sorted(pending)),
         content_action_count=content_count,
         relation_action_count=relation_count,
         legacy_only_action_count=legacy_count,

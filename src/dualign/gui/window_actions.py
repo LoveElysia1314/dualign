@@ -83,9 +83,54 @@ class WindowActionsMixin:
             self._safe_status(f"Demo 文件不存在: {e}")
             self._on_open_files()
 
+    def _workspace_entry_for(self, src: str, tgt: str):
+        """从工作区队列解析与 src/tgt 匹配的 FilePair（无则返回 None）。
+
+        优先取当前选中项，其次按路径匹配队列项。集成方（如阅读器）通过
+        entries 清单传入的 FilePair 携带 report_path；此处兜底保证所有
+        队列加载入口都能把报告路径带给 load_file_pair。
+        """
+        ws = getattr(self, "_workspace", None)
+        if ws is None:
+            return None
+        it = ws.selected_item()
+        if it is not None and getattr(it, "entry", None) is not None:
+            entry = it.entry
+            if (
+                getattr(entry, "document_a_path", "") == src
+                and getattr(entry, "document_b_path", "") == tgt
+            ):
+                return entry
+        for q in getattr(ws, "_queue", []) or []:
+            if (
+                getattr(q, "entry", None) is not None
+                and q.src_path == src
+                and q.tgt_path == tgt
+            ):
+                return q.entry
+        return None
+
+    @staticmethod
+    def _entry_load_kwargs(entry) -> dict:
+        """提取 entry 的报告路径与文档元数据，作为 load_file_pair 参数。"""
+        if entry is None:
+            return {}
+        return {
+            "alignment_path": getattr(entry, "alignment_path", ""),
+            "document_a_id": getattr(entry, "document_a_id", ""),
+            "document_b_id": getattr(entry, "document_b_id", ""),
+            "language_a": getattr(entry, "language_a", ""),
+            "language_b": getattr(entry, "language_b", ""),
+        }
+
     def _on_workspace_load(self, src: str, tgt: str, label: str):
         """WorkspacePanel 请求对齐指定文件对。"""
-        self.load_file_pair(src, tgt, label)
+        self.load_file_pair(
+            src,
+            tgt,
+            label,
+            **self._entry_load_kwargs(self._workspace_entry_for(src, tgt)),
+        )
 
     def _on_workspace_add_queue(self):
         """＋ 添加按钮回调：弹出文件选择器，加入队列。"""
@@ -107,7 +152,14 @@ class WindowActionsMixin:
         """对齐当前选中的文件对。"""
         sel = self._workspace.selected_item()
         if sel:
-            self.load_file_pair(sel.src_path, sel.tgt_path, sel.label)
+            self.load_file_pair(
+                sel.src_path,
+                sel.tgt_path,
+                sel.label,
+                **self._entry_load_kwargs(
+                    self._workspace_entry_for(sel.src_path, sel.tgt_path)
+                ),
+            )
 
     def _on_workspace_remove_checked(self):
         """移除当前选中的文件对。"""
@@ -1385,22 +1437,30 @@ class WindowActionsMixin:
         return True
 
     def _on_apply_confirmed_changes(self):
-        """Review and atomically overwrite sources plus the rebased report."""
-        changes = self._sync_pair_editing_state()
-        if changes is None:
-            QMessageBox.information(self, "覆写源文档", "请先加载并对齐两个文档。")
+        """Review and atomically solidify configured effects."""
+        if self._repair_state is None or self._pair_base_state is None:
+            QMessageBox.information(self, "固化修改", "请先加载并对齐两个文档。")
             return
-        if not changes.has_content_changes:
+        if not self._on_save_alignment():
+            return
+        from dualign.services.solidify import build_solidification_plan
+
+        plan = build_solidification_plan(
+            self._pair_base_state,
+            self._repair_state.repair_log,
+            self._current_solidify_policy(),
+        )
+        if not plan.has_changes:
             QMessageBox.information(
                 self,
-                "没有待覆写的正文更改",
-                "当前只有关系或审查状态变化，保存工作报告即可。",
+                "没有待固化的修改",
+                "当前配置没有选中可写入正文的修复；未选中的操作仍保留在工作报告中。",
             )
             return
 
-        from dualign.gui.dialogs import ChangeReviewDialog
+        from dualign.gui.dialogs import SolidifyReviewDialog
 
-        dialog = ChangeReviewDialog(changes, self)
+        dialog = SolidifyReviewDialog(plan, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -1412,27 +1472,75 @@ class WindowActionsMixin:
 
         try:
             result = save_pair_transaction(
-                changes.working,
+                plan.solidified,
                 document_a_path=self._src_path,
                 document_b_path=self._tgt_path,
                 report_path=self._alignment_path,
                 report=load_report(self._alignment_path),
                 expected_report_sha256=self._alignment_file_hash,
                 expected_report_exists=self._alignment_file_present,
+                remaining_repair_log=plan.remaining_actions,
+                solidification_policy=plan.policy.to_dict(),
+                applied_repairs=plan.applied,
             )
         except (PairSaveError, ValueError) as exc:
-            QMessageBox.critical(self, "覆写源文档失败", str(exc))
+            QMessageBox.critical(self, "固化修改失败", str(exc))
             return
 
         self._alignment_file_hash = result.report_sha256
         self._alignment_file_present = True
+        # ── 固化成功后立即同步内存修复状态与磁盘事务结果 ──
+        # _reload_current_pair() 是异步加载，窗口期内任何 _save_session()
+        # 都会用旧的 repair_log / ai_proposals 覆盖已清空的报告，导致
+        # 已删除/已合并的行重新出现在 AI 建议列表中。
+        from dualign.models.action import AiProposalStore
+
+        self._repair_state = RepairState(
+            self._repair_state.snapshot,
+            list(plan.remaining_actions),
+            AiProposalStore(),
+        )
         QMessageBox.information(
             self,
-            "已覆写源文档",
-            "两份正文与重建后的工作报告已作为一个可恢复事务写入。\n"
-            "原校订操作已归入报告历史，正在重新加载。",
+            "已固化修改",
+            "正文与重建后的工作报告已作为一个可恢复事务写入。\n"
+            f"已固化 {len(plan.applied)} 条，工作报告保留 "
+            f"{len(plan.remaining_actions)} 条，正在重新加载。",
         )
         self._reload_current_pair()
+
+    def _current_solidify_policy(self):
+        from dualign.services.solidify import SolidifyPolicy
+
+        actions = getattr(self, "_solidify_type_actions", {})
+        enabled = {key for key, action in actions.items() if action.isChecked()}
+        return SolidifyPolicy(frozenset(enabled))
+
+    def _save_solidify_types(self, _checked=False):
+        from dualign.gui.settings import KEY_SOLIDIFY_TYPES
+
+        policy = self._current_solidify_policy()
+        cfg = DualignConfig.instance()
+        cfg.set(KEY_SOLIDIFY_TYPES, list(policy.to_dict()["include"]))
+        cfg.save()
+
+    def _set_solidify_preset(self, name: str):
+        from dualign.services.solidify import SolidifyPolicy
+
+        policy = SolidifyPolicy.from_preset(name)
+        for key, action in getattr(self, "_solidify_type_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(key in policy.enabled)
+            action.blockSignals(False)
+        self._save_solidify_types()
+        labels = {
+            "edits": "仅校订文本",
+            "line-aligned": "行级兼容（全部）",
+            "document-a": "仅文档 A",
+            "document-b": "仅文档 B",
+            "none": "全部关闭",
+        }
+        self._set_temp_status(f"固化范围已切换为：{labels[name]}", "info")
 
     def _on_undo(self):
         """撤销 — 恢复位置 + 同步 AiProposalStore。

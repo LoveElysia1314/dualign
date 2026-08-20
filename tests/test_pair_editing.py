@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from dualign.models.alignment_pair import (
@@ -109,3 +111,29 @@ def test_replace_blocks_requires_a_contiguous_range():
             ("新一", "新三"),
             id_prefix="edit",
         )
+
+
+def test_delete_link_content_removes_both_documents_and_relation():
+    state = _state()
+
+    deleted = state.delete_link_content("L2")
+
+    assert deleted.document_a.blocks == ("甲", "丁")
+    assert deleted.document_b.blocks == ("A",)
+    assert [link.id for link in deleted.links] == ["L1", "L3"]
+    assert deleted.to_alignment_pair().links[1].document_a == (2,)
+
+
+def test_delete_link_content_rejects_a_shared_block():
+    state = _state()
+    shared = replace(
+        state,
+        links=(
+            state.links[0],
+            replace(state.links[1], document_a=(state.links[0].document_a[0],)),
+            state.links[2],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="其他对齐关系"):
+        shared.delete_link_content("L1")

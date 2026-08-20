@@ -12,6 +12,7 @@ from pathlib import Path
 
 from dualign.config import get_cache_root
 from dualign.models.pair_editing import PairEditingState
+from dualign.models.state import MISSING
 from dualign.services.alignment_io import document_sha256, document_sha256_from_text
 from dualign.services.report_io import build_report
 
@@ -22,6 +23,32 @@ class PairSaveError(RuntimeError):
 
 class PairSaveConflictError(PairSaveError):
     """Raised when a file changed outside Dualign after it was opened."""
+
+
+class PairSavePlaceholderError(PairSaveError):
+    """Raised when a ⟢MISSING⟣ placeholder would be written into a document.
+
+    The placeholder only exists in the review state (a missing-side marker),
+    it must never reach the natural documents.  If it would, that is a data
+    bug that should be surfaced instead of silently written or filtered.
+    """
+
+
+def _guard_no_missing_placeholder(text_a: str, text_b: str) -> None:
+    """拒绝把独立 ⟢MISSING⟣ 占位符行写入正文文档。
+
+    占位符只属于校订状态（表示「译文缺失」），不应出现在正文中。
+    检测独立的占位符行（strip 后完全等于 MISSING 常量）——这是
+    最明确的残留信号；内嵌于正文文本中的符号不作处理（可能是引用）。
+    """
+    for label, text in (("文档 A", text_a), ("文档 B", text_b)):
+        for line in text.split("\n"):
+            if line.strip() == MISSING:
+                raise PairSavePlaceholderError(
+                    f"检测到 {label} 将写入 ⟢MISSING⟣ 占位符行，已拒绝保存。"
+                    "该符号只表示校订阶段的『译文缺失』，不应写入正文文档；"
+                    "请先在人工/AI 校订中补译对应行，再重新固化。"
+                )
 
 
 @dataclass(frozen=True)
@@ -128,13 +155,24 @@ def save_pair_transaction(
     expected_report_sha256: str = "",
     expected_report_exists: bool | None = None,
     transaction_dir: str | Path | None = None,
+    remaining_repair_log=(),
+    solidification_policy: dict | None = None,
+    applied_repairs=(),
 ) -> PairSaveResult:
-    """Save two documents and their rebased report as one transaction."""
+    """Save two documents and their rebased report as one transaction.
+
+    ``remaining_repair_log`` is already anchored to the rebuilt operations.
+    This makes full and selective solidification share the same recoverable
+    three-file transaction.
+    """
 
     path_a = Path(document_a_path).resolve()
     path_b = Path(document_b_path).resolve()
     report_target = Path(report_path).resolve()
-    if len({os.path.normcase(str(path)) for path in (path_a, path_b, report_target)}) != 3:
+    if (
+        len({os.path.normcase(str(path)) for path in (path_a, path_b, report_target)})
+        != 3
+    ):
         raise PairSaveError("两份正文和工作报告必须使用三个不同路径")
 
     expected_a = state.document_a_ref.sha256
@@ -166,6 +204,7 @@ def save_pair_transaction(
 
     text_a = state.document_a.render_text()
     text_b = state.document_b.render_text()
+    _guard_no_missing_placeholder(text_a, text_b)
     hash_a = document_sha256_from_text(text_a)
     hash_b = document_sha256_from_text(text_b)
     pair = state.to_alignment_pair()
@@ -184,19 +223,34 @@ def save_pair_transaction(
     history = list(previous.get("history", []))
     history.append(
         {
-            "type": "source-overwrite",
+            "type": (
+                "selective-solidification"
+                if solidification_policy is not None
+                else "source-overwrite"
+            ),
             "at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "repair_log": list(previous.get("repair_log", [])),
+            "policy": dict(solidification_policy or {}),
+            "applied_repairs": list(applied_repairs),
         }
     )
     previous["history"] = history
+    # Proposal and score caches use the old snap numbers.  Accepted work is in
+    # repair_log/history, so clearing these derived views avoids stale anchors.
+    previous["ai_proposals"] = {}
+    previous["ai_review"] = {}
+    previous["scores"] = {}
     stats = dict(previous.get("stats") or {})
     stats.update(
         {
             "n_source": len(state.document_a.blocks),
             "n_target": len(state.document_b.blocks),
             "n_ops": len(operations),
-            "alignment_origin": "source-overwrite",
+            "alignment_origin": (
+                "selective-solidification"
+                if solidification_policy is not None
+                else "source-overwrite"
+            ),
         }
     )
     rebased_report = build_report(
@@ -207,7 +261,7 @@ def save_pair_transaction(
         stats=stats,
         quality=dict(previous.get("quality") or {}),
         provenance=dict(previous.get("provenance") or {}),
-        repair_log=(),
+        repair_log=remaining_repair_log,
         previous=previous,
         document_a_sha256_value=hash_a,
         document_b_sha256_value=hash_b,

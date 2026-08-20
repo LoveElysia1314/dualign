@@ -1,8 +1,8 @@
 """Durable JSON work reports for one pair of documents.
 
 The report is the only persisted editing state.  Source documents stay
-untouched until the user explicitly overwrites them; paired reader rows are
-materialized from the report only when a consumer asks for them.
+untouched until the user explicitly solidifies selected effects; paired reader
+rows are materialized from the report only when a consumer asks for them.
 """
 
 from __future__ import annotations
@@ -173,10 +173,9 @@ def report_matches_documents(
 ) -> bool:
     documents = report.get("documents") or {}
     try:
-        return (
-            documents["a"]["sha256"] == document_sha256(document_a_path)
-            and documents["b"]["sha256"] == document_sha256(document_b_path)
-        )
+        return documents["a"]["sha256"] == document_sha256(
+            document_a_path
+        ) and documents["b"]["sha256"] == document_sha256(document_b_path)
     except (KeyError, OSError, TypeError):
         return False
 

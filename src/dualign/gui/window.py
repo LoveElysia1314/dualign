@@ -70,6 +70,7 @@ from dualign.gui.settings import (
     KEY_SHOW_HANDLED,
     KEY_CROSS_GROUP_OP,
     KEY_QUALITY_GATE,
+    KEY_SOLIDIFY_TYPES,
 )
 
 # 底部面板：展开最小总高度（含标题栏 24px），低于此值自动折叠
@@ -1612,10 +1613,41 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             "保存工作报告", self._on_save_alignment, QKeySequence.StandardKey.Save
         )
         fm.addAction(
-            "覆写源文档...",
+            "固化修改...",
             self._on_apply_confirmed_changes,
             QKeySequence("Ctrl+Shift+S"),
         )
+        solidify_settings = fm.addMenu("固化范围")
+        presets = solidify_settings.addMenu("预设")
+        for label, preset in (
+            ("仅校订文本", "edits"),
+            ("行级兼容（全部）", "line-aligned"),
+            ("仅文档 A", "document-a"),
+            ("仅文档 B", "document-b"),
+            ("全部关闭", "none"),
+        ):
+            presets.addAction(
+                label,
+                lambda _checked=False, name=preset: self._set_solidify_preset(name),
+            )
+        solidify_settings.addSeparator()
+        from dualign.services.solidify import (
+            DEFAULT_SOLIDIFY_TYPES,
+            SOLIDIFY_TYPE_LABELS,
+            SolidifyPolicy,
+        )
+
+        saved_types = DualignConfig.instance().get(
+            KEY_SOLIDIFY_TYPES,
+            list(SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES).enabled),
+        )
+        self._solidify_type_actions = {}
+        for key, label in SOLIDIFY_TYPE_LABELS.items():
+            action = solidify_settings.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key in saved_types)
+            action.toggled.connect(self._save_solidify_types)
+            self._solidify_type_actions[key] = action
         fm.addSeparator()
 
         # ── 查看文件子菜单：快速打开源文件/修复文件/报告 ──

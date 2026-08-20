@@ -81,6 +81,14 @@ class AlignConfig:
     allow_insertions: bool = True
     allow_merge: bool = True
 
+    # ── 双边信任余量锚点参数（默认 = 全局常量，向后兼容）──
+    # 余弦绝对刻度是模型自己的 calibration：0.60 是 harrier-0.6b
+    # 坐标系上的合适阈值。更换嵌入模型时应通过此处（或 provider 级
+    # 配置）覆盖，而不是修改全局常量。
+    anchor_min_score: float = ANCHOR_MIN_SCORE
+    anchor_margin_slope: float = ANCHOR_MARGIN_SLOPE
+    anchor_margin_intercept: float = ANCHOR_MARGIN_INTERCEPT
+
 
 @dataclass
 class AlignmentResult:
@@ -177,34 +185,42 @@ def pair_score(
 # ═══════════════════════════════════════════════════════════════
 
 
-def bilateral_trust_margin(score: float) -> float:
-    """双边信任余量公式: margin = 0.10 × score - 0.05"""
-    if score < ANCHOR_MIN_SCORE:
+def bilateral_trust_margin(
+    score: float,
+    min_score: float = ANCHOR_MIN_SCORE,
+    slope: float = ANCHOR_MARGIN_SLOPE,
+    intercept: float = ANCHOR_MARGIN_INTERCEPT,
+) -> float:
+    """双边信任余量公式: margin = slope × score - intercept"""
+    if score < min_score:
         return float("inf")
-    return ANCHOR_MARGIN_SLOPE * score - ANCHOR_MARGIN_INTERCEPT
+    return slope * score - intercept
 
 
 def find_bilateral_anchors(
     sim_matrix: np.ndarray,
+    min_score: float = ANCHOR_MIN_SCORE,
+    margin_slope: float = ANCHOR_MARGIN_SLOPE,
+    margin_intercept: float = ANCHOR_MARGIN_INTERCEPT,
 ) -> List[_AlignmentOperation]:
     """双边信任余量锚点搜索（向量化）。"""
     src_top1 = np.max(sim_matrix, axis=1)
     tgt_top1 = np.max(sim_matrix, axis=0)
 
     src_margins = np.where(
-        src_top1 >= ANCHOR_MIN_SCORE,
-        ANCHOR_MARGIN_SLOPE * src_top1 - ANCHOR_MARGIN_INTERCEPT,
+        src_top1 >= min_score,
+        margin_slope * src_top1 - margin_intercept,
         np.inf,
     )
     tgt_margins = np.where(
-        tgt_top1 >= ANCHOR_MIN_SCORE,
-        ANCHOR_MARGIN_SLOPE * tgt_top1 - ANCHOR_MARGIN_INTERCEPT,
+        tgt_top1 >= min_score,
+        margin_slope * tgt_top1 - margin_intercept,
         np.inf,
     )
 
     src_pass = sim_matrix >= (src_top1 - src_margins).reshape(-1, 1)
     tgt_pass = sim_matrix >= (tgt_top1 - tgt_margins).reshape(1, -1)
-    min_pass = sim_matrix >= ANCHOR_MIN_SCORE
+    min_pass = sim_matrix >= min_score
     mask = src_pass & tgt_pass & min_pass
 
     rows, cols = np.where(mask)
@@ -423,6 +439,9 @@ def _recursive_anchor_search(
     m: int,
     depth: int = 0,
     max_depth: int = 100,
+    min_score: float = ANCHOR_MIN_SCORE,
+    margin_slope: float = ANCHOR_MARGIN_SLOPE,
+    margin_intercept: float = ANCHOR_MARGIN_INTERCEPT,
 ) -> List[_AlignmentOperation]:
     """Phase 1: 递归双边信任余量锚点搜索。
 
@@ -432,7 +451,12 @@ def _recursive_anchor_search(
     if depth >= max_depth:
         return []
 
-    raw = find_bilateral_anchors(sim_matrix)
+    raw = find_bilateral_anchors(
+        sim_matrix,
+        min_score=min_score,
+        margin_slope=margin_slope,
+        margin_intercept=margin_intercept,
+    )
     if not raw:
         return []
 
@@ -451,6 +475,9 @@ def _recursive_anchor_search(
                 sub_t_end - sub_t_start,
                 depth + 1,
                 max_depth,
+                min_score,
+                margin_slope,
+                margin_intercept,
             )
             all_anchors.extend(_offset_one_to_one_ops(sub_anchors, sub_s, sub_t_start))
 
@@ -796,7 +823,14 @@ def align(
     t1 = time.perf_counter()
 
     # Phase 1
-    anchors = _recursive_anchor_search(sim_matrix, n, m)
+    anchors = _recursive_anchor_search(
+        sim_matrix,
+        n,
+        m,
+        min_score=config.anchor_min_score,
+        margin_slope=config.anchor_margin_slope,
+        margin_intercept=config.anchor_margin_intercept,
+    )
     n_true_anchors = len(anchors)  # 纯真锚点（Phase 1 结果）
     t2 = time.perf_counter()
 

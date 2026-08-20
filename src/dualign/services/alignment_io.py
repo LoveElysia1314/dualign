@@ -137,7 +137,7 @@ def create_alignment_pair(
     tool_version: str = "",
     provenance: Mapping[str, Any] | None = None,
 ) -> AlignmentPair:
-    """Create the in-memory relation graph used by source-overwrite review."""
+    """Create the in-memory relation graph used by solidification review."""
 
     path_a = Path(document_a_path)
     path_b = Path(document_b_path)

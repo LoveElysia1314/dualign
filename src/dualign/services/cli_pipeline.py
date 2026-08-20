@@ -96,8 +96,17 @@ def align_documents(
     model=None,
     config=None,
     strategy: str = "minimal",
+    reset_work_state: bool = False,
+    reuse_alignment: bool = True,
+    preserve_work_state: bool = False,
 ) -> dict:
-    """Align two documents and persist only their replayable work report."""
+    """Align two documents and persist only their replayable work report.
+
+    ``reuse_alignment`` controls whether a matching report may supply its
+    expensive alignment relations. ``reset_work_state`` rebuilds the report;
+    with ``preserve_work_state`` it retains existing review decisions and only
+    auto-repairs unresolved relations, otherwise it starts from clean state.
+    """
 
     path_a = Path(document_a_path)
     path_b = Path(document_b_path)
@@ -117,15 +126,64 @@ def align_documents(
             return {"success": False, "error": "模型未加载"}
     provenance = _provenance(encoder, cfg)
 
-    if target.is_file():
+    if reuse_alignment and target.is_file():
         try:
             cached = load_report(target)
             if report_matches_documents(
                 cached, path_a, path_b
             ) and report_matches_provenance(cached, provenance):
+                cached_operations = operations_from_report(cached)
+                if reset_work_state:
+                    from dualign.models.action import RepairAction
+                    from dualign.models.state import AlignmentSnapshot
+                    from dualign.services.repair import RepairService, RepairState
+
+                    existing_actions = (
+                        [
+                            RepairAction.from_dict(item)
+                            for item in cached.get("repair_log", [])
+                        ]
+                        if preserve_work_state
+                        else []
+                    )
+                    quality = dict(cached.get("quality") or {})
+                    state = RepairState(
+                        AlignmentSnapshot.from_alignment(
+                            cached_operations, lines_a, lines_b
+                        ),
+                        existing_actions,
+                    )
+                    repair_log = RepairService.auto_repair(
+                        state,
+                        strategy=strategy,
+                        model=encoder,
+                        unresolved_only=preserve_work_state,
+                    ).repair_log
+                    report = build_report(
+                        chapter_id=path_a.stem.split(".")[0],
+                        document_a_path=path_a,
+                        document_b_path=path_b,
+                        operations=cached_operations,
+                        stats=dict(cached.get("stats") or {}),
+                        quality=quality,
+                        provenance=provenance,
+                        repair_log=repair_log,
+                        previous=cached if preserve_work_state else None,
+                    )
+                    save_report(report, target)
+                    return {
+                        "success": True,
+                        "ops": cached_operations,
+                        "report_path": str(target),
+                        "quality": quality.get("level", ""),
+                        "rejections": quality.get("rejections", []),
+                        "cache_hit": True,
+                        "work_state_reset": True,
+                        "work_state_preserved": preserve_work_state,
+                    }
                 return {
                     "success": True,
-                    "ops": operations_from_report(cached),
+                    "ops": cached_operations,
                     "report_path": str(target),
                     "quality": (cached.get("quality") or {}).get("level", ""),
                     "rejections": (cached.get("quality") or {}).get("rejections", []),
@@ -163,7 +221,7 @@ def align_documents(
         "indicators": assessment["indicators"],
     }
     repair_log = []
-    if result.all_ops and assessment["quality"] != "unreliable":
+    if result.all_ops:
         from dualign.models.state import AlignmentSnapshot
         from dualign.services.repair import RepairService, RepairState
 
@@ -175,7 +233,7 @@ def align_documents(
         ).repair_log
 
     previous = None
-    if target.is_file():
+    if reuse_alignment and target.is_file() and not reset_work_state:
         try:
             candidate = load_report(target)
             if report_matches_documents(candidate, path_a, path_b):
@@ -201,6 +259,7 @@ def align_documents(
         "quality": quality["level"],
         "rejections": quality["rejections"],
         "cache_hit": False,
+        "work_state_reset": reset_work_state,
     }
 
 

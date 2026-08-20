@@ -5,6 +5,7 @@ Dualign — CLI 入口
   python -m dualign [-h]
   python -m dualign gui [--document-a A.md --document-b B.md]
   python -m dualign align --document-a A.md --document-b B.md [-o pair.report.json]
+  python -m dualign solidify -a A.md -b B.md -r pair.report.json --preset line-aligned
 """
 
 from __future__ import annotations
@@ -125,6 +126,75 @@ def main_align(document_a: str, document_b: str, output: str = ""):
     return 0
 
 
+def main_solidify(
+    document_a: str,
+    document_b: str,
+    report: str,
+    *,
+    preset: str = "",
+    config: str = "",
+    include=(),
+    exclude=(),
+    apply: bool = False,
+):
+    """Preview or apply selective report solidification."""
+
+    from dualign.services.solidify import (
+        DEFAULT_SOLIDIFY_TYPES,
+        SolidifyPolicy,
+        load_solidify_policy,
+        plan_report_solidification,
+        solidify_report,
+    )
+    from dualign.services.pair_save import PairSaveError
+
+    try:
+        if config:
+            policy = load_solidify_policy(config)
+        elif preset:
+            policy = SolidifyPolicy.from_preset(preset)
+        else:
+            policy = SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES)
+        enabled = set(policy.enabled)
+        enabled.update(include or ())
+        enabled.difference_update(exclude or ())
+        policy = SolidifyPolicy(frozenset(enabled))
+        plan, _report = plan_report_solidification(
+            document_a, document_b, report, policy
+        )
+    except (OSError, ValueError) as exc:
+        print(f"固化计划失败: {exc}")
+        return 1
+
+    print("固化范围: " + (", ".join(sorted(policy.enabled)) or "（无）"))
+    print(f"将写入的修复: {len(plan.applied)}")
+    print(f"保留在报告中的操作: {len(plan.remaining_actions)}")
+    for diff in (plan.document_a_diff(), plan.document_b_diff()):
+        if diff:
+            print("\n" + diff.rstrip())
+    if not plan.has_changes:
+        print("\n没有符合当前配置的待固化修改。")
+        return 0
+    if not apply:
+        print("\n以上仅为预览；确认后追加 --apply 才会改写文件。")
+        return 0
+    try:
+        _plan, result = solidify_report(
+            document_a,
+            document_b,
+            report,
+            policy,
+        )
+    except (OSError, ValueError, PairSaveError) as exc:
+        print(f"固化失败: {exc}")
+        return 1
+    if result is None:
+        print("没有写入任何文件。")
+    else:
+        print("\n[OK] 两份文档和重建后的工作报告已完成事务写入。")
+    return 0
+
+
 def main():
     from dualign import __version__
 
@@ -136,6 +206,7 @@ def main():
         "  dualign check                   环境健康检查\n"
         "  dualign models                  列出可用模型\n"
         "  dualign align -a a.md -b b.md     生成可恢复的 JSON 报告\n"
+        "  dualign solidify -a a.md -b b.md -r a.report.json  预览固化\n"
         "  dualign gui                     启动图形界面",
     )
     parser.add_argument(
@@ -178,6 +249,46 @@ def main():
         help="*.report.json 路径；传目录时使用默认文件名",
     )
 
+    # ── solidify ──
+    p_solidify = sub.add_parser("solidify", help="按配置将报告中的部分修复固化到文档")
+    p_solidify.add_argument("-a", "--document-a", required=True, help="文档 A 路径")
+    p_solidify.add_argument("-b", "--document-b", required=True, help="文档 B 路径")
+    p_solidify.add_argument("-r", "--report", required=True, help="工作报告路径")
+    p_solidify.add_argument(
+        "--preset",
+        choices=("edits", "line-aligned", "document-a", "document-b", "none"),
+        default="",
+        help="固化预设；省略时使用出厂默认（仅校订+译文拆分）",
+    )
+    p_solidify.add_argument(
+        "--config", default="", help="JSON/TOML 固化配置；可含 preset/include/exclude"
+    )
+    p_solidify.add_argument(
+        "--include",
+        action="append",
+        choices=(
+            "merge_a", "split_a", "edit_a",
+            "merge_b", "split_b", "edit_b",
+            "delete_pair",
+        ),
+        default=[],
+        help="额外启用一种修复类型，可重复指定",
+    )
+    p_solidify.add_argument(
+        "--exclude",
+        action="append",
+        choices=(
+            "merge_a", "split_a", "edit_a",
+            "merge_b", "split_b", "edit_b",
+            "delete_pair",
+        ),
+        default=[],
+        help="排除一种修复类型，可重复指定",
+    )
+    p_solidify.add_argument(
+        "--apply", action="store_true", help="实际写入；省略时仅显示预览"
+    )
+
     # ── check ──
     sub.add_parser("check", help="环境健康检查")
 
@@ -194,6 +305,17 @@ def main():
         )
     elif args.command == "align":
         return main_align(args.document_a, args.document_b, args.output)
+    elif args.command == "solidify":
+        return main_solidify(
+            args.document_a,
+            args.document_b,
+            args.report,
+            preset=args.preset,
+            config=args.config,
+            include=args.include,
+            exclude=args.exclude,
+            apply=args.apply,
+        )
     elif args.command == "check":
         return _cmd_check()
     elif args.command == "models":

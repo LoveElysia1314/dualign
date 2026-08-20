@@ -478,7 +478,7 @@ class ReviewController(QWidget):
                 ("realign", "重新对齐", self.doc_realign_requested),
                 ("auto_repair", "自动校订", self.doc_auto_repair_requested),
                 ("reset_repair", "重置校订", self.doc_reset_repair_requested),
-                ("overwrite", "覆写源文档…", self.doc_overwrite_requested),
+                ("overwrite", "固化修改…", self.doc_overwrite_requested),
             ]
         ):
             b = QPushButton(lb)

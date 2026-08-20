@@ -10,6 +10,7 @@ from dualign.services.alignment_io import document_sha256
 from dualign.services.pair_save import (
     PairSaveConflictError,
     PairSaveError,
+    PairSavePlaceholderError,
     recover_pending_pair_saves,
     save_pair_transaction,
 )
@@ -168,3 +169,60 @@ def test_recovery_rolls_back_an_interrupted_install(tmp_path: Path):
 
     assert recover_pending_pair_saves(transaction_dir) == ["已回滚未完成保存: test"]
     assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_save_refuses_missing_placeholder_in_document_a(tmp_path: Path):
+    """固化防线：⟢MISSING⟣ 占位符绝不允许写入正文文档。"""
+    path_a, path_b, report_path, state = _case(tmp_path)
+    expected = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    placeholder = "\u27e2MISSING\u27e3"
+    edited = state.edit_link_content(
+        "L1", document_a=["甲", placeholder], document_b=["A"]
+    )
+
+    with pytest.raises(PairSavePlaceholderError, match="文档 A"):
+        _save(
+            edited,
+            path_a,
+            path_b,
+            report_path,
+            expected_report_sha256=expected,
+            transaction_dir=tmp_path / "transactions",
+        )
+
+    # 任何文件都不应被写入
+    assert path_a.read_text(encoding="utf-8") == "甲\n\n乙\n"
+    assert path_b.read_text(encoding="utf-8") == "A\n"
+
+
+def test_save_refuses_missing_placeholder_in_document_b(tmp_path: Path):
+    """译文侧占位符同样被拒绝。"""
+    path_a, path_b, report_path, state = _case(tmp_path)
+    placeholder = "\u27e2MISSING\u27e3"
+    edited = state.edit_link_content(
+        "L1", document_a=["甲"], document_b=[placeholder]
+    )
+
+    with pytest.raises(PairSavePlaceholderError, match="文档 B"):
+        _save(edited, path_a, path_b, report_path)
+
+    assert path_b.read_text(encoding="utf-8") == "A\n"
+
+
+def test_save_allows_embedded_missing_symbol_in_prose(tmp_path: Path):
+    """正文文本中内嵌的符号（非独立占位符行）不拦截——可能是正常引用。"""
+    path_a, path_b, report_path, state = _case(tmp_path)
+    placeholder = "\u27e2MISSING\u27e3"
+    edited = state.edit_link_content(
+        "L1", document_a=["甲", "符号 " + placeholder + " 出现于文中"], document_b=["A"]
+    )
+
+    result = _save(
+        edited,
+        path_a,
+        path_b,
+        report_path,
+        transaction_dir=tmp_path / "transactions",
+    )
+    assert result.report_sha256
+    assert path_a.read_text(encoding="utf-8") == "甲\n\n符号 " + placeholder + " 出现于文中\n"

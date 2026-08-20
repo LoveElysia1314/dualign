@@ -23,6 +23,7 @@ from dualign.models.marker import (
     is_edit,
     is_split,
     is_flagged,
+    is_from_ai,
     combine,
     is_divider,
     AI_PREFIX,
@@ -86,14 +87,38 @@ def _apply_info_free(state: ChapterState, snap_i: int, marker: str) -> ChapterSt
             )
         return state.replace_snap(snap_i, g.with_marker(marker))
 
-    # [OK] / [F] 是元标记（不含 [AI] 前缀时）：叠加到现有操作标记上
-    # [AI][OK] / [AI][F] 是 AI 操作的完整标记，直接设置
-    if (is_approved(marker) or is_flagged(marker)) and AI_PREFIX not in marker:
+    # [OK] / [F] 是元标记：叠加到现有操作标记上，保留修复信息与来源前缀。
+    # 例如 [M] + [AI][OK] → "[M] [AI][OK]"（AI 认可了合并，而非覆盖它）。
+    # 无先前操作时保持完整标记（[OK] / [AI][OK]）原样设置。
+    if is_approved(marker) or is_flagged(marker):
         existing = g.rows[0].marker if g.rows else ""
-        new = combine(existing, marker)
-        return state.replace_snap(snap_i, g.with_marker(new))
+        if existing:
+            new = _combine_meta(existing, marker)
+            return state.replace_snap(snap_i, g.with_marker(new))
+        return state.replace_snap(snap_i, g.with_marker(marker))
 
     return state.replace_snap(snap_i, g.with_marker(marker))
+
+
+def _combine_meta(existing: str, new_tag: str) -> str:
+    """叠加 ok/flag 元标记（支持 [AI] 前缀），保留已有的修复操作标记。
+
+    与 marker.combine 的语义一致（[OK] 与 [F] 互斥、同类去重），
+    区别是保留 [AI] 来源前缀，供"AI 认可已有修复"场景使用。
+    """
+    base = "[OK]" if is_approved(new_tag) else "[F]"
+    ai_prefix = AI_PREFIX if is_from_ai(new_tag) else ""
+    tags_to_remove = {base}
+    if base == "[OK]":
+        tags_to_remove.add("[F]")
+    elif base == "[F]":
+        tags_to_remove.add("[OK]")
+    parts = [
+        p for p in existing.split(" ") if p and not any(t in p for t in tags_to_remove)
+    ]
+    clean = " ".join(parts).strip()
+    new = f"{clean} {ai_prefix}{base}" if clean else f"{ai_prefix}{base}"
+    return new
 
 
 def _apply_info_full(
@@ -822,6 +847,7 @@ class RepairService:
         anchor_ratio: float = 1.0,
         max_anchor_gap: int = 0,
         cache: Optional[EmbeddingCache] = None,
+        unresolved_only: bool = False,
     ) -> RepairState:
         """遍历所有非 1:1 的 snap，按策略一键修复。
 
@@ -850,7 +876,26 @@ class RepairService:
         result = state
         snap = result.snapshot
 
+        protected: set[int] = set()
+        flags_by_snap: Dict[int, List[RepairAction]] = {}
+        if unresolved_only:
+            for action in state.repair_log:
+                affected = {action.op_index}
+                for raw_index in action.data.get("orig_snaps", []):
+                    try:
+                        affected.add(int(raw_index))
+                    except (TypeError, ValueError):
+                        continue
+                if action.kind == "flag":
+                    for affected_index in affected:
+                        flags_by_snap.setdefault(affected_index, []).append(action)
+                else:
+                    # ok 是明确的人工接受；正文修复则已经解决了该关系。
+                    protected.update(affected)
+
         for snap_i in range(len(snap.original_ops)):
+            if snap_i in protected:
+                continue
             s_idx, t_idx, _sc = snap.original_ops[snap_i]
             ls, lt = len(s_idx), len(t_idx)
 
@@ -894,6 +939,11 @@ class RepairService:
                     result = RepairService.repair_placeholder(result, snap_i, "tgt")
                 else:
                     result = RepairService.repair_delete(result, snap_i)
+
+            # flag 表示仍待关注，而不是阻止机器提出结构修复。自动修复会先
+            # 替换同 snap 的操作，因此在其后重新附加原标记，保留审阅意图。
+            for flag in flags_by_snap.get(snap_i, []):
+                result = result.apply(flag)
 
         return result
 

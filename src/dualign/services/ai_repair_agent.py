@@ -10,7 +10,8 @@ Dualign — AiRepairAgent: Tool-Calling 智能校订代理
 用法:
   from dualign.services.ai_repair_agent import AiRepairAgent, ChapterContext
   agent = AiRepairAgent(backend="deepseek")
-  actions = agent.run(chapter_context)
+  # initial_state 传入已有修复操作的 RepairState，使 ok 工具能识别并认可已有修复
+  actions = agent.run(chapter_context, initial_state=state)
 """
 
 from __future__ import annotations
@@ -790,6 +791,23 @@ class ToolExecutor:
             new_src = [new_src]
         if isinstance(new_tgt, str):
             new_tgt = [new_tgt]
+
+        # ── 占位符防线：新文本不得包含 ⟢MISSING⟣ 占位符 ──
+        # 该符号只表示「译文缺失」，不是可固化的文本。若 AI 输出它，
+        # 拒绝并提示补译，避免占位符经 edit 固化进正文。
+        from dualign.models.state import MISSING as _MISSING
+
+        offending = [
+            line
+            for line in (*new_src, *new_tgt)
+            if isinstance(line, str) and line.strip() == _MISSING
+        ]
+        if offending:
+            return (
+                "❌ **edit 拒绝**: 新文本包含 ⟢MISSING⟣ 占位符，这不是可固化的文本。\n\n"
+                "该符号只表示『译文缺失』。请提供真实译文/原文，"
+                "若确实无法翻译请用 flag 标记该 snap 交由人工处理。"
+            )
 
         # ── 范围编辑行数校验：范围含 N 个 snap 时，任一侧行数必须等于 N ──
         if is_range and (new_src or new_tgt):

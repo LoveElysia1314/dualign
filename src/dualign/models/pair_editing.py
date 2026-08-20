@@ -400,6 +400,45 @@ class PairEditingState:
         links.insert(first, merged)
         return replace(self, links=tuple(links))
 
+    def delete_link_content(self, link_id: str) -> "PairEditingState":
+        """Delete one relation and the document blocks owned by it.
+
+        A block referenced by another relation cannot be deleted safely: doing
+        so would turn that relation into a dangling reference.  Normal
+        line-alignment reports do not share blocks, but the guard keeps manual
+        or imported alignment graphs from being damaged silently.
+        """
+
+        target = self.link(link_id)
+        other_links = tuple(link for link in self.links if link.id != link_id)
+        referenced_a = {
+            block_id for link in other_links for block_id in link.document_a
+        }
+        referenced_b = {
+            block_id for link in other_links for block_id in link.document_b
+        }
+        shared_a = set(target.document_a) & referenced_a
+        shared_b = set(target.document_b) & referenced_b
+        if shared_a or shared_b:
+            raise ValueError("不能删除仍被其他对齐关系引用的正文块")
+
+        document_a = self.document_a
+        document_b = self.document_b
+        if target.document_a:
+            document_a, _ = document_a.replace_blocks(
+                target.document_a, (), id_prefix=f"{link_id}.deleted.a"
+            )
+        if target.document_b:
+            document_b, _ = document_b.replace_blocks(
+                target.document_b, (), id_prefix=f"{link_id}.deleted.b"
+            )
+        return replace(
+            self,
+            document_a=document_a,
+            document_b=document_b,
+            links=other_links,
+        )
+
     def split_link(
         self,
         link_id: str,

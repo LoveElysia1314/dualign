@@ -47,6 +47,16 @@ from dualign.services.report_io import (
     save_report,
     set_ai_review,
 )
+from dualign.services.solidify import (
+    SOLIDIFY_PRESETS,
+    SOLIDIFY_TYPES,
+    SolidificationPlan,
+    SolidifyPolicy,
+    build_solidification_plan,
+    load_solidify_policy,
+    plan_report_solidification,
+    solidify_report,
+)
 
 __all__ = [
     # repair
@@ -71,7 +81,7 @@ __all__ = [
     "SimilarityScorer",
     # cli_pipeline
     "align_documents",
-    # source overwrite transaction
+    # solidification transaction
     "PairSaveConflictError",
     "PairSaveError",
     "PairSaveResult",
@@ -92,4 +102,13 @@ __all__ = [
     "set_ai_review",
     "ReportError",
     "materialize_reader_rows",
+    # selective solidification
+    "SOLIDIFY_PRESETS",
+    "SOLIDIFY_TYPES",
+    "SolidificationPlan",
+    "SolidifyPolicy",
+    "build_solidification_plan",
+    "load_solidify_policy",
+    "plan_report_solidification",
+    "solidify_report",
 ]

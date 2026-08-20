@@ -119,6 +119,37 @@ class TestTargetParamUnification:
         result = ex.execute(_call("edit", {"target": "1-2", "new_tgt": ["只有一行"]}))
         assert "edit 拒绝" in result, result
 
+    def test_edit_rejects_missing_placeholder_in_new_tgt(self, reviewable_ctx):
+        """占位符防线：新译文含 ⟢MISSING⟣ → 拒绝，不产生 edit 操作。"""
+        ex = _executor(reviewable_ctx)
+        placeholder = "\u27e2MISSING\u27e3"
+        result = ex.execute(
+            _call("edit", {"target": "1", "new_tgt": [placeholder]})
+        )
+        assert "占位符" in result, result
+        assert "edit 拒绝" in result, result
+        assert 1 not in ex.reviewed_ids
+        assert not ex.reviewed_actions
+
+    def test_edit_rejects_missing_placeholder_in_new_src(self, reviewable_ctx):
+        ex = _executor(reviewable_ctx)
+        placeholder = "\u27e2MISSING\u27e3"
+        result = ex.execute(
+            _call("edit", {"target": "5", "new_src": [placeholder, "B"]})
+        )
+        assert "edit 拒绝" in result, result
+        assert 5 not in ex.reviewed_ids
+
+    def test_edit_allows_embedded_missing_in_prose(self, reviewable_ctx):
+        """内嵌符号（非独立占位符行）不拦截。"""
+        ex = _executor(reviewable_ctx)
+        placeholder = "\u27e2MISSING\u27e3"
+        result = ex.execute(
+            _call("edit", {"target": "1", "new_tgt": ["正文提及 " + placeholder]})
+        )
+        assert "✏️ 编辑" in result, result
+        assert 1 in ex.reviewed_ids
+
     def test_unknown_tool(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
         result = ex.execute(_call("force_done", {"note": "x"}))

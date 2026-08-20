@@ -930,21 +930,13 @@ class ChangeReviewDialog(QDialog):
         self.resize(980, 680)
 
         layout = QVBoxLayout(self)
-        pending = changes.unreviewed_content_operations
-        if pending:
-            summary = f"正文变更 {changes.content_action_count} 项；存在未完成人工审核的关系：" + "、".join(
-                str(index + 1) for index in pending
-            )
-            color = "#D97706"
-        else:
-            summary = (
-                f"正文变更 {changes.content_action_count} 项，关系操作 "
-                f"{changes.relation_action_count} 项；已通过应用条件。"
-            )
-            color = "#2E7D32"
+        summary = (
+            f"正文变更 {changes.content_action_count} 项，关系操作 "
+            f"{changes.relation_action_count} 项。"
+        )
         label = QLabel(summary)
         label.setWordWrap(True)
-        label.setStyleSheet(f"font-weight:600;color:{color};")
+        label.setStyleSheet("font-weight:600;color:#2E7D32;")
         layout.addWidget(label)
 
         tabs = QTabWidget()
@@ -966,8 +958,144 @@ class ChangeReviewDialog(QDialog):
         apply_button = buttons.button(QDialogButtonBox.StandardButton.Save)
         apply_button.setText("应用已确认更改")
         apply_button.setEnabled(changes.can_apply)
-        if pending:
-            apply_button.setToolTip("请先在主界面逐项人工审核自动正文更改")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class SolidifyPolicyDialog(QDialog):
+    """Shared solidification policy editor for Dualign and integrating apps."""
+
+    def __init__(self, policy=None, parent=None):
+        super().__init__(parent)
+        from dualign.services.solidify import (
+            DEFAULT_SOLIDIFY_TYPES,
+            SOLIDIFY_PRESETS,
+            SOLIDIFY_TYPE_LABELS,
+            SolidifyPolicy,
+        )
+
+        self.setWindowTitle("固化修改设置")
+        self.setMinimumWidth(420)
+        self._preset_values = [
+            ("自定义", ""),
+            ("仅校订文本", "edits"),
+            ("行级兼容（全部）", "line-aligned"),
+            ("仅文档 A", "document-a"),
+            ("仅文档 B", "document-b"),
+            ("全部关闭", "none"),
+        ]
+        self._checks = {}
+        current = policy or SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "选中的修复会写入正文并从当前工作记录中移除；未选中的修复会重锚后继续保留。"
+            "双侧结构操作须同时启用 A/B 对应类型；审核标记不会丢失。"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        preset_combo = QComboBox()
+        for label, name in self._preset_values:
+            preset_combo.addItem(label, name)
+        preset_combo.currentIndexChanged.connect(self._apply_preset)
+        layout.addWidget(preset_combo)
+
+        for key, label in SOLIDIFY_TYPE_LABELS.items():
+            check = QCheckBox(label)
+            check.setChecked(key in current.enabled)
+            check.toggled.connect(self._mark_custom)
+            layout.addWidget(check)
+            self._checks[key] = check
+
+        matching = next(
+            (
+                index
+                for index, (_label, name) in enumerate(self._preset_values)
+                if name and SOLIDIFY_PRESETS[name] == current.enabled
+            ),
+            0,
+        )
+        preset_combo.blockSignals(True)
+        preset_combo.setCurrentIndex(matching)
+        preset_combo.blockSignals(False)
+        self._preset_combo = preset_combo
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def policy(self):
+        from dualign.services.solidify import SolidifyPolicy
+
+        return SolidifyPolicy(
+            frozenset(key for key, check in self._checks.items() if check.isChecked())
+        )
+
+    def _apply_preset(self, index):
+        from dualign.services.solidify import SolidifyPolicy
+
+        name = self._preset_combo.itemData(index)
+        if not name:
+            return
+        enabled = SolidifyPolicy.from_preset(name).enabled
+        for key, check in self._checks.items():
+            check.blockSignals(True)
+            check.setChecked(key in enabled)
+            check.blockSignals(False)
+
+    def _mark_custom(self, _checked):
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.setCurrentIndex(0)
+        self._preset_combo.blockSignals(False)
+
+
+class SolidifyReviewDialog(QDialog):
+    """Preview selected effects and the report operations that will remain."""
+
+    def __init__(self, plan, parent=None):
+        super().__init__(parent)
+        from dualign.services.solidify import SOLIDIFY_TYPE_LABELS
+
+        self.setWindowTitle("审查固化修改")
+        self.resize(980, 680)
+        layout = QVBoxLayout(self)
+        enabled = [
+            SOLIDIFY_TYPE_LABELS[key]
+            for key in SOLIDIFY_TYPE_LABELS
+            if key in plan.policy.enabled
+        ]
+        summary = (
+            f"固化范围：{'、'.join(enabled) or '无'}；"
+            f"写入 {len(plan.applied)} 条，保留 {len(plan.remaining_actions)} 条。"
+        )
+        label = QLabel(summary)
+        label.setWordWrap(True)
+        label.setStyleSheet("font-weight:600;color:#2E7D32;")
+        layout.addWidget(label)
+
+        tabs = QTabWidget()
+        for title, content in (
+            ("文档 A", plan.document_a_diff()),
+            ("文档 B", plan.document_b_diff()),
+        ):
+            editor = QPlainTextEdit(content or "（无变化）")
+            editor.setReadOnly(True)
+            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            tabs.addTab(editor, title)
+        layout.addWidget(tabs, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        apply_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        apply_button.setText("固化所选修改")
+        apply_button.setEnabled(plan.has_changes)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
