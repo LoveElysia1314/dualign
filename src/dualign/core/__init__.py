@@ -1,6 +1,7 @@
 """Dualign 核心算法模块（无状态纯函数）。"""
 
 from dualign.core.aligner import (
+    ALIGN_CACHE_REVISION,
     AlignConfig,
     AlignmentResult,
     align,
@@ -29,6 +30,7 @@ from dualign.core.file_pair_matcher import (
 )
 
 __all__ = [
+    "ALIGN_CACHE_REVISION",
     "AlignConfig",
     "AlignmentResult",
     "align",

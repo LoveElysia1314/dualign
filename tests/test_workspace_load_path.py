@@ -1,11 +1,4 @@
-"""Regression tests: workspace-driven loads must keep the entry report path.
-
-原缺陷：WorkspacePanel 点击/导航时会同时发射 entry_selected 与
-file_pair_requested 两个信号。前者 (_on_entry_selected) 携带 FilePair 的
-alignment_path 正确加载，后者 (_on_workspace_load) 直接调用
-load_file_pair(src, tgt, label) 丢失报告路径，回退到 default_report_path
-（raw/ 目录），导致打开人工校订后看不到 AI 校订与自动修复记录。
-"""
+"""Workspace selection has one event carrying the complete queue item."""
 
 from dualign.common import FilePair
 from dualign.gui.workspace import FileQueueItem
@@ -19,6 +12,9 @@ class _WorkspaceStub:
 
     def selected_item(self):
         return self._selected
+
+    def set_file_paths(self, src_path, tgt_path, label):
+        pass
 
 
 class _Harness(WindowActionsMixin):
@@ -63,7 +59,7 @@ def _make_queue_item(entry: FilePair) -> FileQueueItem:
     )
 
 
-def test_workspace_load_keeps_entry_alignment_path():
+def test_workspace_selection_keeps_entry_alignment_path():
     entry = FilePair(
         entry_id="one",
         label="One",
@@ -76,7 +72,7 @@ def test_workspace_load_keeps_entry_alignment_path():
     item = _make_queue_item(entry)
     h = _Harness(_WorkspaceStub([item]))
 
-    h._on_workspace_load("a.md", "b.md", "One")
+    h._on_workspace_pair_selected(item)
 
     assert len(h.loaded) == 1
     call = h.loaded[0]
@@ -88,37 +84,11 @@ def test_workspace_load_keeps_entry_alignment_path():
     assert call["language_b"] == "en"
 
 
-def test_workspace_load_resolves_entry_by_paths_when_selection_missing():
-    entry = FilePair(
-        entry_id="one",
-        label="One",
-        document_a_path="a.md",
-        document_b_path="b.md",
-        report_path="alignment/one.report.json",
-    )
-    other = FilePair(
-        entry_id="two",
-        label="Two",
-        document_a_path="x.md",
-        document_b_path="y.md",
-        report_path="",
-    )
-    item_a = _make_queue_item(entry)
-    item_b = _make_queue_item(other)
-    ws = _WorkspaceStub([item_a, item_b])
-    ws._selected = item_b  # 选中项与请求的 src/tgt 不一致
-    h = _Harness(ws)
-
-    h._on_workspace_load("a.md", "b.md", "One")
-
-    assert h.loaded[0]["alignment_path"] == "alignment/one.report.json"
-
-
-def test_workspace_load_without_entry_falls_back_to_default_path():
+def test_workspace_selection_without_entry_uses_plain_paths():
     item = FileQueueItem(label="Plain", src_path="p.md", tgt_path="q.md")
     h = _Harness(_WorkspaceStub([item]))
 
-    h._on_workspace_load("p.md", "q.md", "Plain")
+    h._on_workspace_pair_selected(item)
 
     assert len(h.loaded) == 1
     assert h.loaded[0]["alignment_path"] == ""

@@ -5,6 +5,7 @@ from dualign.common import FilePair
 from dualign.gui.workers import EncodeThread
 from dualign.models.action import RepairAction
 from dualign.services.cli_pipeline import align_documents
+from dualign.services.report_io import load_report
 
 from test_cli_pipeline import MockEncoder
 
@@ -57,7 +58,12 @@ def test_file_pair_exposes_read_only_source_target_aliases():
 
 def test_encode_thread_restores_report_before_loading_model(tmp_path, monkeypatch):
     source, target, report = _report_pair(tmp_path)
-    worker = EncodeThread(str(source), str(target), alignment_path=str(report))
+    worker = EncodeThread(
+        str(source),
+        str(target),
+        alignment_path=str(report),
+        expected_provenance=load_report(report)["provenance"],
+    )
     hits = []
     worker.cache_hit_signal.connect(hits.append)
     monkeypatch.setattr(
@@ -78,6 +84,22 @@ def test_encode_thread_rejects_report_after_source_change(tmp_path):
 
     assert worker._load_cached_alignment("ignored", "ignored") is None
     assert "变化" in worker.formal_alignment_error
+
+
+def test_encode_thread_rejects_report_after_alignment_config_change(tmp_path):
+    source, target, report = _report_pair(tmp_path)
+    provenance = load_report(report)["provenance"]
+    changed = json.loads(json.dumps(provenance))
+    changed["algorithm"]["configuration_sha256"] = "changed"
+    worker = EncodeThread(
+        str(source),
+        str(target),
+        alignment_path=str(report),
+        expected_provenance=changed,
+    )
+
+    assert worker._load_cached_alignment("ignored", "ignored") is None
+    assert "配置已变化" in worker.formal_alignment_error
 
 
 def test_report_can_store_snap_anchored_action_without_materialized_files(tmp_path):

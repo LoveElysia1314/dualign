@@ -85,6 +85,31 @@ class TestAlignStats:
         assert len(ALIGN_CORE_VERSION) > 0
         assert "." in ALIGN_CORE_VERSION
 
+    def test_large_unanchored_gap_skips_merge_encoding(self):
+        target_embeddings = np.eye(102, dtype=np.float64)
+        source_embeddings = np.vstack(
+            (
+                target_embeddings[:51],
+                np.zeros((100, 102), dtype=np.float64),
+                target_embeddings[51:],
+            )
+        )
+
+        def expensive_encode(_texts):
+            raise AssertionError("large structural gaps must fail preflight")
+
+        result = align(
+            [f"s{i}" for i in range(202)],
+            [f"t{i}" for i in range(102)],
+            source_embeddings,
+            target_embeddings,
+            encode_fn=expensive_encode,
+        )
+
+        assert result.stats["max_anchor_gap"] == 100
+        assert result.stats["merge_scoring_skipped"] is True
+        assert "large_anchor_gap" in result.stats["merge_skip_reasons"]
+
 
 class TestNormalize:
     def test_unit_length(self):

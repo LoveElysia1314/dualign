@@ -40,7 +40,7 @@ _IndexTuple = Tuple[int, ...]
 _AlignmentOperation = Tuple[_IndexTuple, _IndexTuple, float]
 _AlignmentPair = Tuple[_IndexTuple, _IndexTuple]
 _EncodeFn = Callable[[List[str]], np.ndarray]
-_Stats = Dict[str, Union[int, float]]
+_Stats = Dict[str, Union[int, float, bool, List[str]]]
 
 logger = logging.getLogger(__name__)
 if not logger.handlers and not logging.getLogger().handlers:
@@ -52,8 +52,10 @@ elif not logger.handlers:
     logger.propagate = False
 
 
-# Backwards-compatible public alias; the package metadata remains authoritative.
+# Public core version follows package metadata.  The cache revision changes
+# independently whenever relations can change without an AlignConfig change.
 ALIGN_CORE_VERSION = __version__
+ALIGN_CACHE_REVISION = "preflight.1"
 
 # ── 双边信任余量锚点参数 ──
 ANCHOR_MARGIN_SLOPE = 0.10
@@ -66,6 +68,12 @@ MERGE_MIN_LENGTH = 2
 
 # ── 容器聚合上限 ──
 MAX_CONTAINER_SIZE = 10
+
+# Cheap preflight before generating and encoding merge candidates.  These are
+# the same safety bounds historically documented by automatic repair, now
+# enforced where they can actually prevent model work.
+MERGE_PREFLIGHT_MIN_ANCHOR_DENSITY = 0.20
+MERGE_PREFLIGHT_MAX_ANCHOR_GAP = 50
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -831,7 +839,15 @@ def align(
         margin_slope=config.anchor_margin_slope,
         margin_intercept=config.anchor_margin_intercept,
     )
+    true_anchors = list(anchors)
     n_true_anchors = len(anchors)  # 纯真锚点（Phase 1 结果）
+    true_anchor_density = 2 * n_true_anchors / (n + m)
+    max_anchor_gap = _max_anchor_gap(true_anchors, n, m)
+    merge_skip_reasons = []
+    if true_anchor_density < MERGE_PREFLIGHT_MIN_ANCHOR_DENSITY:
+        merge_skip_reasons.append("low_anchor_density")
+    if max_anchor_gap > MERGE_PREFLIGHT_MAX_ANCHOR_GAP:
+        merge_skip_reasons.append("large_anchor_gap")
     t2 = time.perf_counter()
 
     # Phase 2
@@ -855,7 +871,20 @@ def align(
             ops.append(((), (j,), 0.0))
         ops = _normalize_int_types(ops)
         elapsed = time.perf_counter() - t0
-        stats = _build_stats(n, m, ops, 0, 0, elapsed, t1 - t0, 0, t2 - t1, t3 - t2)
+        stats = _build_stats(
+            n,
+            m,
+            ops,
+            0,
+            0,
+            elapsed,
+            t1 - t0,
+            0,
+            t2 - t1,
+            t3 - t2,
+            max_anchor_gap=max_anchor_gap,
+            merge_skip_reasons=merge_skip_reasons or ["no_anchors"],
+        )
         return AlignmentResult(
             all_ops=ops,
             anchors=[],
@@ -869,7 +898,7 @@ def align(
     tgt_combos: List[_AlignmentPair] = []
     merge_scores: Dict[_AlignmentPair, float] = {}
 
-    if config.allow_merge and build_merge_cache:
+    if config.allow_merge and build_merge_cache and not merge_skip_reasons:
         src_combos, tgt_combos = _enumerate_merge_combos(anchors, n, m)
     # Phase 4
     if src_combos or tgt_combos:
@@ -912,6 +941,8 @@ def align(
         t2 - t1 + (t3 - t2),
         t6 - t5,
         n_overflow_rows=n_overflow,
+        max_anchor_gap=max_anchor_gap,
+        merge_skip_reasons=merge_skip_reasons,
     )
 
     _log(
@@ -949,6 +980,8 @@ def _build_stats(
     t_dp: float,
     n_containers: int = 0,
     n_overflow_rows: int = 0,
+    max_anchor_gap: int = 0,
+    merge_skip_reasons: Optional[List[str]] = None,
 ) -> _Stats:
     """构建对齐统计信息字典。"""
     total_sim = sum(op[2] for op in all_ops)
@@ -981,8 +1014,10 @@ def _build_stats(
         "n_true_anchors": n_anchors,
         "anchor_density": round(anchor_density, 4),
         "n_11_anchored": n_11,
-        "max_anchor_gap": 0,
+        "max_anchor_gap": max_anchor_gap,
         "n_overflow_rows": n_overflow_rows,
+        "merge_scoring_skipped": bool(merge_skip_reasons),
+        "merge_skip_reasons": list(merge_skip_reasons or []),
         "n_containers": n_containers,
         "n_1to1": n_11,
         "n_merge": op_counts["merge"],
@@ -1107,6 +1142,30 @@ def _count_overflow_rows(
         overflow += gap_end_t - theta
 
     return overflow
+
+
+def _max_anchor_gap(
+    anchors: List[_AlignmentOperation],
+    n: int,
+    m: int,
+) -> int:
+    """Return the longest unanchored run on either document side."""
+    if not anchors:
+        return max(n, m)
+
+    longest = 0
+    previous_source = previous_target = -1
+    for source, target, _score in sorted(
+        anchors, key=lambda item: (item[0][0], item[1][0])
+    ):
+        longest = max(
+            longest,
+            source[0] - previous_source - 1,
+            target[0] - previous_target - 1,
+        )
+        previous_source = source[0]
+        previous_target = target[0]
+    return max(longest, n - previous_source - 1, m - previous_target - 1)
 
 
 # ═══════════════════════════════════════════════════════════════

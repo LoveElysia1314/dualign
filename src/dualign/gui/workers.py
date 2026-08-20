@@ -27,6 +27,7 @@ from dualign.common import (
 )
 from dualign.config import get_embedding_cache_path
 from dualign.services.embedding import (
+    EncodingCancelled,
     load_model_for_provider,
     _try_lazy_load_model,
 )
@@ -70,6 +71,7 @@ class EncodeThread(QThread):
         tgt_lines=None,
         entry_id="",
         alignment_path="",
+        expected_provenance=None,
     ):
         super().__init__(parent)
         self.src_path = src_path
@@ -78,6 +80,7 @@ class EncodeThread(QThread):
         self._tgt_lines = tgt_lines
         self.entry_id = entry_id
         self.alignment_path = alignment_path
+        self.expected_provenance = expected_provenance
         self.formal_alignment_error = ""
         self.time_s = 0.0
         self._stop_event = threading.Event()
@@ -88,6 +91,8 @@ class EncodeThread(QThread):
     def run(self):
         try:
             self._run_impl()
+        except EncodingCancelled:
+            return
         except Exception as e:
             tb_str = _format_worker_exception("EncodeThread")
             self.error_signal.emit(f"编码失败: {e}", tb_str)
@@ -145,10 +150,10 @@ class EncodeThread(QThread):
             cenc = CachedEncoder(model, cache)
 
             # ── 缓存优先编码（内部自动查缓存 / 编码 / 回存）──
-            src_emb = cenc.encode(src_lines)
+            src_emb = cenc.encode(src_lines, stop_event=self._stop_event)
             if self._stop_event.is_set():
                 return
-            tgt_emb = cenc.encode(tgt_lines)
+            tgt_emb = cenc.encode(tgt_lines, stop_event=self._stop_event)
 
             self.time_s = time.time() - t0
             self.status_signal.emit(
@@ -168,11 +173,12 @@ class EncodeThread(QThread):
         )
 
     def _load_cached_alignment(self, src_hash: str, tgt_hash: str):
-        """Restore a report only while both source hashes still match."""
+        """Restore a report only while its semantic alignment key matches."""
         if self.alignment_path and os.path.isfile(self.alignment_path):
             from dualign.services.report_io import (
                 load_report,
                 operations_from_report,
+                report_matches_alignment,
                 report_matches_documents,
             )
 
@@ -180,6 +186,16 @@ class EncodeThread(QThread):
                 report = load_report(self.alignment_path)
                 if not report_matches_documents(report, self.src_path, self.tgt_path):
                     raise ValueError("源文档已变化")
+                if (
+                    self.expected_provenance is not None
+                    and not report_matches_alignment(
+                        report,
+                        self.src_path,
+                        self.tgt_path,
+                        self.expected_provenance,
+                    )
+                ):
+                    raise ValueError("对齐模型或算法配置已变化")
                 result = AlignmentResult(
                     all_ops=operations_from_report(report),
                     anchors=[],

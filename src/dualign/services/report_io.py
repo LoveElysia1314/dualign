@@ -12,6 +12,7 @@ import json
 import os
 import tempfile
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -26,6 +27,49 @@ REPORT_FORMAT = "dualign-report"
 
 class ReportError(ValueError):
     """Raised when a work report is malformed or no longer matches its inputs."""
+
+
+def _semantic_provenance(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only metadata that can change alignment relations.
+
+    Tool releases and lifecycle labels are useful audit data, but must not
+    invalidate an otherwise identical alignment.
+    """
+
+    return {
+        "tool": provenance.get("tool", "dualign"),
+        "algorithm": dict(provenance.get("algorithm") or {}),
+        "embedding": dict(provenance.get("embedding") or {}),
+    }
+
+
+@dataclass(frozen=True)
+class AlignmentKey:
+    """Semantic identity of one reusable alignment result."""
+
+    document_a_sha256: str
+    document_b_sha256: str
+    provenance_sha256: str
+
+    @classmethod
+    def from_values(
+        cls,
+        document_a_sha256: str,
+        document_b_sha256: str,
+        provenance: Mapping[str, Any],
+    ) -> "AlignmentKey":
+        return cls(
+            document_a_sha256=document_a_sha256,
+            document_b_sha256=document_b_sha256,
+            provenance_sha256=_canonical_sha256(_semantic_provenance(provenance)),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "document_a_sha256": self.document_a_sha256,
+            "document_b_sha256": self.document_b_sha256,
+            "provenance_sha256": self.provenance_sha256,
+        }
 
 
 def _now() -> str:
@@ -94,6 +138,9 @@ def build_report(
         }
     )
     old = dict(previous or {})
+    alignment_key = AlignmentKey.from_values(
+        documents["a"]["sha256"], documents["b"]["sha256"], provenance
+    )
     created_at = old.get("created_at") or _now()
     report: dict[str, Any] = {
         "format": REPORT_FORMAT,
@@ -108,6 +155,7 @@ def build_report(
         "segmentation": "content-line",
         "ops": ops,
         "snapshot_fingerprint": fingerprint,
+        "alignment_key": alignment_key.to_dict(),
         "provenance": dict(provenance),
         "stats": dict(stats),
         "quality": dict(quality),
@@ -183,7 +231,55 @@ def report_matches_documents(
 def report_matches_provenance(
     report: Mapping[str, Any], provenance: Mapping[str, Any]
 ) -> bool:
-    return report.get("provenance") == dict(provenance)
+    return _semantic_provenance(report.get("provenance") or {}) == _semantic_provenance(
+        provenance
+    )
+
+
+def report_alignment_key(report: Mapping[str, Any]) -> AlignmentKey | None:
+    documents = report.get("documents") or {}
+    try:
+        computed = AlignmentKey.from_values(
+            str(documents["a"]["sha256"]),
+            str(documents["b"]["sha256"]),
+            report.get("provenance") or {},
+        )
+        stored = report.get("alignment_key")
+        if stored is not None and stored != computed.to_dict():
+            return None
+        return computed
+    except (KeyError, TypeError):
+        return None
+
+
+def expected_alignment_key(
+    document_a_path: str | Path,
+    document_b_path: str | Path,
+    provenance: Mapping[str, Any],
+) -> AlignmentKey:
+    return AlignmentKey.from_values(
+        document_sha256(document_a_path),
+        document_sha256(document_b_path),
+        provenance,
+    )
+
+
+def report_matches_alignment(
+    report: Mapping[str, Any],
+    document_a_path: str | Path,
+    document_b_path: str | Path,
+    provenance: Mapping[str, Any],
+) -> bool:
+    """Check the single semantic cache identity used by every front end."""
+
+    actual = report_alignment_key(report)
+    if actual is None:
+        return False
+    try:
+        expected = expected_alignment_key(document_a_path, document_b_path, provenance)
+    except OSError:
+        return False
+    return actual == expected
 
 
 def repair_state_from_report(

@@ -26,6 +26,11 @@ from dualign.config import (
 
 logger = logging.getLogger(__name__)
 
+
+class EncodingCancelled(RuntimeError):
+    """Raised when a caller cancels an embedding request."""
+
+
 # ── Ollama 配置 ──
 OLLAMA_BASE_URL = os.environ.get("DUALIGN_OLLAMA_URL", "http://localhost:11434")
 
@@ -143,7 +148,7 @@ class OllamaEncoder:
         while i < len(texts):
             # ── 检查停止信号（GUI 窗口关闭时中断编码）──
             if stop_event is not None and stop_event.is_set():
-                break
+                raise EncodingCancelled("嵌入编码已取消")
             batch = texts[i : i + _bs]
             import requests as _requests
 
@@ -227,10 +232,7 @@ class OllamaEncoder:
             i += len(batch)
             single_tokenize_retries = 0
 
-        # ── 如果被中断，返回已编码的部分或空数组 ──
         if not all_embs:
-            if stop_event is not None and stop_event.is_set():
-                return np.zeros((0, self._dim or 768))
             return np.zeros((0, self._dim or 768))
         result = np.stack(all_embs)
         if self._dim is None and len(result) > 0:
@@ -304,7 +306,7 @@ class OpenAICompatibleEncoder:
         for i in range(0, len(texts), batch_size):
             # ── 检查停止信号（GUI 窗口关闭时中断编码）──
             if stop_event is not None and stop_event.is_set():
-                break
+                raise EncodingCancelled("嵌入编码已取消")
             batch = texts[i : i + batch_size]
             try:
                 resp = requests.post(
@@ -359,10 +361,7 @@ class OpenAICompatibleEncoder:
                 raise RuntimeError(f"❌ API 响应解析失败: {e}")
             all_embs.extend(embs)
 
-        # ── 如果被中断，返回已编码的部分或空数组 ──
         if not all_embs:
-            if stop_event is not None and stop_event.is_set():
-                return np.zeros((0, self._dim or 768))
             return np.zeros((0, self._dim or 768))
         result = np.stack(all_embs)
         if self._dim is None and len(result) > 0:
@@ -382,6 +381,25 @@ class OpenAICompatibleEncoder:
 # ═══════════════════════════════════════════════════════════════
 
 _MODEL_CACHE: dict = {}
+
+
+def _effective_instruction(config) -> str:
+    raw = getattr(config, "instruction_text", None)
+    if raw:
+        return raw
+    return INSTRUCTION_TEXT if config.provider_id == "ollama" else ""
+
+
+def _provider_cache_key(config, instruction: str) -> tuple[str, str, str, str, str]:
+    """Identify a configured encoder by every request-affecting setting."""
+
+    return (
+        str(config.provider_id),
+        str(config.base_url).rstrip("/"),
+        str(config.model_name),
+        instruction,
+        str(getattr(config, "api_key", "")),
+    )
 
 
 def load_model_for_provider(config=None):
@@ -422,22 +440,12 @@ def load_model_for_provider(config=None):
         logger.info("未找到已配置的嵌入提供方，使用默认 Ollama")
         config = DEFAULT_PROVIDERS[0]
 
-    cache_key = f"{config.provider_id}:{config.model_name}"
+    instr = _effective_instruction(config)
+    cache_key = _provider_cache_key(config, instr)
     if cache_key in _MODEL_CACHE:
         return _MODEL_CACHE[cache_key]
 
     pid = config.provider_id
-    # ── per-provider Instruction ──
-    # Ollama 默认为 INSTRUCTION_TEXT，其他提供方默认为空字符串。
-    # 用户可在 providers.json 或 GUI 中按提供方配置。
-    # 空字符串 → 编码器不拼接前缀（instruction 为 falsy 时跳过）。
-    raw = getattr(config, "instruction_text", None)
-    if raw:
-        instr = raw  # 用户显式配置了 → 使用
-    elif pid == "ollama":
-        instr = INSTRUCTION_TEXT  # Ollama 默认启用
-    else:
-        instr = ""  # 其他提供方默认不启用（空字符串 → encode 时跳过）
 
     if pid == "ollama":
         model = OllamaEncoder(
@@ -473,9 +481,6 @@ def _try_lazy_load_model():
         ProviderManager.load()
         config = ProviderManager.active()
         if config is not None:
-            cache_key = config.provider_id
-            if cache_key in _MODEL_CACHE:
-                return _MODEL_CACHE[cache_key]
             return load_model_for_provider(config)
     except Exception as e:
         logger.warning("读取配置失败: %s", e)

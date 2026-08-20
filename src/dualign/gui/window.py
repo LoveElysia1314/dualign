@@ -240,7 +240,6 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._enc_thread = None
         self._worker = None
         self._load_op_id: int = 0
-        self._current_load_op_id: int = 0
         self.src_lines: List[str] = []
         self.tgt_lines: List[str] = []
         self.src_emb = None
@@ -478,11 +477,10 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
         # ── 左侧 Dock 区：审校面板（前台）+ 文件管理（后台）──
         self._workspace = WorkspacePanel()
-        self._workspace.file_pair_requested.connect(self._on_workspace_load)
+        self._workspace.pair_selected.connect(self._on_workspace_pair_selected)
         self._workspace.add_queue_requested.connect(self._on_workspace_add_queue)
         self._workspace.doc_remove_requested.connect(self._on_workspace_remove_checked)
         self._workspace.chapter_nav_requested.connect(self._on_workspace_nav)
-        self._workspace.entry_selected.connect(self._on_entry_selected)
 
         # 审校面板
         self._review.doc_align_requested.connect(self._on_workspace_align_checked)

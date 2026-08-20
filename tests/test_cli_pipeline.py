@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 
+from dualign.core import AlignConfig
 from dualign.models.action import RepairAction
 from dualign.services.cli_pipeline import align_documents
 from dualign.services.report_io import load_report, materialize_reader_rows, save_report
@@ -56,6 +57,41 @@ def test_matching_report_skips_model_and_stale_document_invalidates_it(tmp_path)
     source.write_text("changed\n", encoding="utf-8")
     third = align_documents(str(source), str(target), str(report), model=encoder)
     assert third["success"] and not third["cache_hit"]
+
+
+def test_alignment_configuration_is_part_of_report_cache_identity(tmp_path):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "chapter.report.json"
+    encoder = MockEncoder()
+    assert align_documents(str(source), str(target), str(report), model=encoder)[
+        "success"
+    ]
+
+    changed = align_documents(
+        str(source),
+        str(target),
+        str(report),
+        model=encoder,
+        config=AlignConfig(anchor_min_score=0.42),
+    )
+
+    assert changed["success"] and not changed["cache_hit"]
+
+
+def test_tool_release_metadata_does_not_invalidate_same_alignment(tmp_path):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "chapter.report.json"
+    encoder = MockEncoder()
+    assert align_documents(str(source), str(target), str(report), model=encoder)[
+        "success"
+    ]
+    data = load_report(report)
+    data["provenance"]["tool_version"] = "future-ui-release"
+    save_report(data, report)
+
+    reused = align_documents(str(source), str(target), str(report), model=encoder)
+
+    assert reused["cache_hit"] is True
 
 
 def test_reset_work_state_reuses_alignment_but_discards_review_markers(tmp_path):

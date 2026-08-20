@@ -37,13 +37,16 @@ from dualign.services.pair_editing_adapter import (
 )
 from dualign.services.quality_gate import (
     assess_alignment_quality,
+    automatic_repair_blockers,
     QualityGateConfig,
     _gap_row_ratio,
 )
 from dualign.services.report_io import (
+    AlignmentKey,
     ReportError,
     load_report,
     materialize_reader_rows,
+    report_matches_alignment,
     save_report,
     set_ai_review,
 )
@@ -94,11 +97,14 @@ __all__ = [
     "link_id_for_operation",
     # quality_gate
     "assess_alignment_quality",
+    "automatic_repair_blockers",
     "QualityGateConfig",
     "_gap_row_ratio",
     # report_io
     "save_report",
     "load_report",
+    "AlignmentKey",
+    "report_matches_alignment",
     "set_ai_review",
     "ReportError",
     "materialize_reader_rows",

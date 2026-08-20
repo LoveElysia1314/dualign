@@ -83,54 +83,14 @@ class WindowActionsMixin:
             self._safe_status(f"Demo 文件不存在: {e}")
             self._on_open_files()
 
-    def _workspace_entry_for(self, src: str, tgt: str):
-        """从工作区队列解析与 src/tgt 匹配的 FilePair（无则返回 None）。
+    def _on_workspace_pair_selected(self, item):
+        """Load exactly once from a workspace selection event."""
 
-        优先取当前选中项，其次按路径匹配队列项。集成方（如阅读器）通过
-        entries 清单传入的 FilePair 携带 report_path；此处兜底保证所有
-        队列加载入口都能把报告路径带给 load_file_pair。
-        """
-        ws = getattr(self, "_workspace", None)
-        if ws is None:
-            return None
-        it = ws.selected_item()
-        if it is not None and getattr(it, "entry", None) is not None:
-            entry = it.entry
-            if (
-                getattr(entry, "document_a_path", "") == src
-                and getattr(entry, "document_b_path", "") == tgt
-            ):
-                return entry
-        for q in getattr(ws, "_queue", []) or []:
-            if (
-                getattr(q, "entry", None) is not None
-                and q.src_path == src
-                and q.tgt_path == tgt
-            ):
-                return q.entry
-        return None
-
-    @staticmethod
-    def _entry_load_kwargs(entry) -> dict:
-        """提取 entry 的报告路径与文档元数据，作为 load_file_pair 参数。"""
-        if entry is None:
-            return {}
-        return {
-            "alignment_path": getattr(entry, "alignment_path", ""),
-            "document_a_id": getattr(entry, "document_a_id", ""),
-            "document_b_id": getattr(entry, "document_b_id", ""),
-            "language_a": getattr(entry, "language_a", ""),
-            "language_b": getattr(entry, "language_b", ""),
-        }
-
-    def _on_workspace_load(self, src: str, tgt: str, label: str):
-        """WorkspacePanel 请求对齐指定文件对。"""
-        self.load_file_pair(
-            src,
-            tgt,
-            label,
-            **self._entry_load_kwargs(self._workspace_entry_for(src, tgt)),
-        )
+        if item.entry is not None:
+            self._on_entry_selected(item.entry)
+            return
+        self._current_entry = None
+        self.load_file_pair(item.src_path, item.tgt_path, item.label)
 
     def _on_workspace_add_queue(self):
         """＋ 添加按钮回调：弹出文件选择器，加入队列。"""
@@ -152,14 +112,7 @@ class WindowActionsMixin:
         """对齐当前选中的文件对。"""
         sel = self._workspace.selected_item()
         if sel:
-            self.load_file_pair(
-                sel.src_path,
-                sel.tgt_path,
-                sel.label,
-                **self._entry_load_kwargs(
-                    self._workspace_entry_for(sel.src_path, sel.tgt_path)
-                ),
-            )
+            self._on_workspace_pair_selected(sel)
 
     def _on_workspace_remove_checked(self):
         """移除当前选中的文件对。"""
@@ -269,6 +222,7 @@ class WindowActionsMixin:
         # 文本读取、哈希计算与 report 缓存探测均放到工作线程；GUI 先进入
         # 锁定预览态，避免大章节/网络模型准备期间冻结主事件循环。
         from dualign.gui.workers import EncodeThread
+        from dualign.services.cli_pipeline import _provenance
 
         if hasattr(self, "_welcome") and self._welcome is not None:
             self._welcome.set_aligning("正在读取并检查缓存…")
@@ -284,13 +238,38 @@ class WindowActionsMixin:
             tgt_path,
             entry_id=_entry_id,
             alignment_path=self._alignment_path,
+            expected_provenance=_provenance(None, self._align_config),
         )
-        self._enc_thread.status_signal.connect(self._on_prepare_status)
-        self._enc_thread.text_ready_signal.connect(self._on_text_ready)
-        self._enc_thread.cache_hit_signal.connect(self._on_alignment_cache_hit)
-        self._enc_thread.finished_signal.connect(self._on_encoded)
-        self._enc_thread.error_signal.connect(self._on_worker_error)
+        self._connect_encode_thread(self._enc_thread, self._load_op_id)
         self._enc_thread.start()
+
+    def _connect_encode_thread(self, thread, generation: int):
+        """Connect one encode job with its immutable load generation."""
+        thread.status_signal.connect(
+            lambda message, g=generation: (
+                self._on_prepare_status(message) if g == self._load_op_id else None
+            )
+        )
+        thread.text_ready_signal.connect(
+            lambda src_hash, tgt_hash, src_lines, tgt_lines, g=generation: (
+                self._on_text_ready(g, src_hash, tgt_hash, src_lines, tgt_lines)
+            )
+        )
+        thread.cache_hit_signal.connect(
+            lambda payload, g=generation: self._on_alignment_cache_hit(g, payload)
+        )
+        thread.finished_signal.connect(
+            lambda se, te, sl, tl, sh, th, g=generation: self._on_encoded(
+                g, se, te, sl, tl, sh, th
+            )
+        )
+        thread.error_signal.connect(
+            lambda context, traceback, g=generation: (
+                self._on_worker_error(context, traceback)
+                if g == self._load_op_id
+                else None
+            )
+        )
 
     def _on_prepare_status(self, message: str):
         """同步后台准备阶段到日志和预览锁定提示。"""
@@ -353,7 +332,6 @@ class WindowActionsMixin:
         wait(15000) 给足 15 秒让当前 HTTP 批次完成，避免 QThread 销毁时报错闪退。
         """
         self._load_op_id += 1
-        self._current_load_op_id = self._load_op_id
 
         if self._enc_thread is not None and self._enc_thread.isRunning():
             self._enc_thread.stop()
@@ -380,14 +358,13 @@ class WindowActionsMixin:
             self._worker.wait(15000)
             self._worker = None
 
-    def _on_text_ready(self, _src_hash, _tgt_hash, src_lines, tgt_lines):
+    def _on_text_ready(self, generation, _src_hash, _tgt_hash, src_lines, tgt_lines):
         """文本就绪回调 — 立即进入预览模式展示原文/译文行。
 
         EncodeThread 读取文件后第一时间发射，此时编码尚未开始。
         用户可阅读文本，评分列暂显示灰色 "…"。
         """
-        op_id = getattr(self, "_current_load_op_id", 0)
-        if op_id != self._load_op_id:
+        if generation != self._load_op_id:
             return
         self.src_lines, self.tgt_lines = src_lines, tgt_lines
         self._src_hash, self._tgt_hash = _src_hash, _tgt_hash
@@ -400,10 +377,9 @@ class WindowActionsMixin:
         self._status_bar.set_preview_active(True, phase="正在检查缓存…")
         self._render_preview()
 
-    def _on_alignment_cache_hit(self, payload):
+    def _on_alignment_cache_hit(self, generation, payload):
         """后台确认 report 缓存有效后，直接恢复校订态而不加载模型。"""
-        op_id = getattr(self, "_current_load_op_id", 0)
-        if op_id != self._load_op_id:
+        if generation != self._load_op_id:
             return
         result, src_lines, tgt_lines, src_hash, tgt_hash = payload
         self.src_lines, self.tgt_lines = src_lines, tgt_lines
@@ -412,16 +388,14 @@ class WindowActionsMixin:
         self._status("已加载工作报告", "success")
         self._ensure_table_in_stacked()
         self._show_table()
-        self._on_align_done(result)
+        self._on_align_done(generation, result)
 
-    def _on_encoded(self, se, te, sl, tl, sh, th):
+    def _on_encoded(self, generation, se, te, sl, tl, sh, th):
         """EncodeThread 完成后回调（接收 6 个参数）。存到实例变量，启动对齐。
 
         如果 _load_op_id 已变更（即新的 load_file_pair 已启动），则丢弃此结果。
         """
-        # ── 操作 ID 校验：丢弃前一次取消操作残留的延迟回调 ──
-        op_id = getattr(self, "_current_load_op_id", 0)
-        if op_id != self._load_op_id:
+        if generation != self._load_op_id:
             return
 
         try:
@@ -442,7 +416,7 @@ class WindowActionsMixin:
 
             self._status("对齐中...")
             QApplication.processEvents()
-            self._start_align()
+            self._start_align(generation)
         except Exception as e:
             self._show_error("编码完成回调", e)
 
@@ -450,7 +424,7 @@ class WindowActionsMixin:
         """Return the sole JSON work-report path."""
         return getattr(self, "_alignment_path", "")
 
-    def _start_align(self):
+    def _start_align(self, generation):
         """构造 AlignWorker 并启动对齐。"""
         from dualign.gui.workers import AlignWorker
         from dualign.services.embedding import _try_lazy_load_model
@@ -486,20 +460,26 @@ class WindowActionsMixin:
             tgt_path=getattr(self, "_tgt_path", ""),
             entry_id=getattr(self, "_current_entry_id", ""),
         )
-        self._worker.finished_signal.connect(self._on_align_done)
-        self._worker.error_signal.connect(self._on_worker_error)
+        self._worker.finished_signal.connect(
+            lambda result, g=generation: self._on_align_done(g, result)
+        )
+        self._worker.error_signal.connect(
+            lambda context, traceback, g=generation: (
+                self._on_worker_error(context, traceback)
+                if g == self._load_op_id
+                else None
+            )
+        )
         self._worker.start()
 
-    def _on_align_done(self, result: AlignmentResult):
+    def _on_align_done(self, generation: int, result: AlignmentResult):
         """对齐完成后初始化修复状态。尝试加载已有的修复会话。
 
         如果 _load_op_id 已变更（即新的 load_file_pair 已启动），则丢弃此结果。
         全方法 try/except 保护，防止未捕获异常导致窗口闪退。
         """
         try:
-            # ── 操作 ID 校验：丢弃前一次取消操作残留的延迟回调 ──
-            op_id = getattr(self, "_current_load_op_id", 0)
-            if op_id != self._load_op_id:
+            if generation != self._load_op_id:
                 return
 
             self._alignment_snapshot = AlignmentSnapshot.from_alignment(
@@ -568,47 +548,29 @@ class WindowActionsMixin:
 
             self._last_quality_assessment = assessment
 
-            # Save a complete, atomic report. Existing AI/review fields survive
-            # only when the report still belongs to these exact documents.
-            from dualign.services.cli_pipeline import _provenance
-            from dualign.services.embedding import _try_lazy_load_model
-            from dualign.services.report_io import (
-                ReportError,
-                build_report,
-                load_report,
-                report_matches_documents,
-                save_report,
-            )
-
             _report_path = self._session_path()
-            _previous = None
-            if os.path.isfile(_report_path):
-                try:
-                    _candidate = load_report(_report_path)
-                    if report_matches_documents(
-                        _candidate, self._src_path, self._tgt_path
-                    ):
-                        _previous = _candidate
-                except ReportError:
-                    pass
-            _report = build_report(
-                chapter_id=self._current_entry_id,
-                document_a_path=self._src_path,
-                document_b_path=self._tgt_path,
-                operations=result.all_ops,
-                stats=stats,
-                quality={
-                    "level": quality,
-                    "rejections": rejections,
-                    "indicators": indicators,
-                },
-                provenance=_provenance(_try_lazy_load_model(), self._align_config),
-                repair_log=self._repair_state.repair_log,
-                previous=_previous,
-            )
-            save_report(_report, _report_path)
+            if stats.get("load_origin") != "report":
+                from dualign.services.cli_pipeline import _provenance
+                from dualign.services.embedding import _try_lazy_load_model
+                from dualign.services.report_io import build_report, save_report
+
+                _report = build_report(
+                    chapter_id=self._current_entry_id,
+                    document_a_path=self._src_path,
+                    document_b_path=self._tgt_path,
+                    operations=result.all_ops,
+                    stats=stats,
+                    quality={
+                        "level": quality,
+                        "rejections": rejections,
+                        "indicators": indicators,
+                    },
+                    provenance=_provenance(_try_lazy_load_model(), self._align_config),
+                    repair_log=self._repair_state.repair_log,
+                )
+                save_report(_report, _report_path)
             self._alignment_file_hash = self._file_bytes_hash(_report_path)
-            self._alignment_file_present = True
+            self._alignment_file_present = os.path.isfile(_report_path)
 
             # ── 将初始分数载入 ScoreManager 缓存 ──
             if hasattr(self, "_score_mgr"):
@@ -659,10 +621,11 @@ class WindowActionsMixin:
         """重新对齐 — 清除缓存后重新编码 + 对齐（异步，不阻塞 GUI）。"""
         if not self.src_lines or not self.tgt_lines:
             return
-        # ── 使用 _invalidate_align_cache 替代 _clear_session，保留外部 AI 校订数据 ──
+        self._cancel_current_load()
         self._invalidate_align_cache()
 
         from dualign.gui.workers import EncodeThread
+        from dualign.services.cli_pipeline import _provenance
 
         self._status("重新编码中…")
         QApplication.processEvents()
@@ -671,11 +634,12 @@ class WindowActionsMixin:
         tgt_path = getattr(self, "_tgt_path", "")
         if src_path and tgt_path:
             self._enc_thread = EncodeThread(
-                src_path, tgt_path, entry_id=self._current_entry_id
+                src_path,
+                tgt_path,
+                entry_id=self._current_entry_id,
+                expected_provenance=_provenance(None, self._align_config),
             )
-            self._enc_thread.status_signal.connect(self._status)
-            self._enc_thread.finished_signal.connect(self._on_encoded)
-            self._enc_thread.error_signal.connect(self._on_worker_error)
+            self._connect_encode_thread(self._enc_thread, self._load_op_id)
             self._enc_thread.start()
         else:
             self._status("错误: 无法找到源文件路径", "error")
@@ -1238,17 +1202,15 @@ class WindowActionsMixin:
         """一键修复 — 通过后台线程执行，避免阻塞主线程。"""
         if self._repair_state is None:
             return
-        if self._strategy == "src" and not self._ensure_model():
-            self._safe_status("该策略需要编码模型，请先完成一次对齐")
-            return
 
-        # ── 锚点门控：复用 _on_align_done 已计算的品质信息 ──
+        # Run the cheap structural gate before loading a model or opening the
+        # embedding cache.  This is the resource boundary for non-parallel input.
         stats = getattr(self, "_align_stats", None) or {}
         n_containers = stats.get("n_containers", 0)
         qa = getattr(self, "_last_quality_assessment", None)
-        if qa:
-            is_unreliable = qa["quality"] == "unreliable"
-        else:
+        from dualign.services.quality_gate import automatic_repair_blockers
+
+        if not qa:
             n_src = stats.get("n_source", 0) or len(self.src_lines or [])
             n_tgt = stats.get("n_target", 0) or len(self.tgt_lines or [])
             from dualign.services.quality_gate import (
@@ -1269,14 +1231,28 @@ class WindowActionsMixin:
                 gap_ratio = _gap_row_ratio(_ops, n_src, n_tgt)
             else:
                 gap_ratio = 0.0
-            fallback = assess_alignment_quality(
-                stats, n_src, n_tgt, gap_row_ratio=gap_ratio
+            qa = assess_alignment_quality(
+                stats,
+                n_src,
+                n_tgt,
+                gap_row_ratio=gap_ratio,
+                n_overflow_rows=stats.get("n_overflow_rows", 0),
             )
-            is_unreliable = fallback["quality"] == "unreliable"
 
-        if is_unreliable:
-            ad = qa["indicators"]["anchor_density"] if qa else 0
-            self._safe_status(f"✗ 已拒绝修复 — 真锚点密度 {ad:.0%}")
+        blockers = automatic_repair_blockers(qa)
+        if blockers:
+            indicators = qa.get("indicators", {})
+            if "merge_overflow" in blockers:
+                detail = f"合并触顶 {indicators.get('n_overflow_rows', 0)} 行"
+            elif "gap_dominated" in blockers:
+                detail = f"间隙行占比 {indicators.get('gap_row_ratio', 0):.0%}"
+            else:
+                detail = f"真锚点密度 {indicators.get('anchor_density', 0):.0%}"
+            self._safe_status(f"✗ 已拒绝自动修复 — {detail}")
+            return
+
+        if self._strategy == "src" and not self._ensure_model():
+            self._safe_status("该策略需要编码模型，请先完成一次对齐")
             return
 
         # 容器操作提示

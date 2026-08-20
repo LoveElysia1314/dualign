@@ -9,13 +9,13 @@ from dualign.config import get_embedding_cache_path
 from dualign.core import AlignConfig, AlignmentResult, align
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.embedding_cache import EmbeddingCache
+from dualign.services.quality_gate import automatic_repair_blockers
 from dualign.services.report_io import (
     ReportError,
     build_report,
     load_report,
     operations_from_report,
-    report_matches_documents,
-    report_matches_provenance,
+    report_matches_alignment,
     save_report,
 )
 
@@ -31,9 +31,10 @@ def _provenance(model, config: AlignConfig) -> dict:
     import json
 
     from dualign import __version__
-    from dualign.core import ALIGN_CORE_VERSION
+    from dualign.core import ALIGN_CACHE_REVISION, ALIGN_CORE_VERSION
 
     provider = ""
+    endpoint = ""
     model_name = getattr(model, "_model", "") if model is not None else ""
     instruction = getattr(model, "_instruction", "") if model is not None else ""
     try:
@@ -43,8 +44,13 @@ def _provenance(model, config: AlignConfig) -> dict:
         active = ProviderManager.active()
         if active is not None:
             provider = active.provider_id
+            endpoint = str(active.base_url).rstrip("/")
             model_name = model_name or active.model_name
             instruction = instruction or active.instruction_text
+            if not instruction and active.provider_id == "ollama":
+                from dualign.config import INSTRUCTION_TEXT
+
+                instruction = INSTRUCTION_TEXT
     except (OSError, ValueError):
         pass
     config_payload = json.dumps(vars(config), sort_keys=True, separators=(",", ":"))
@@ -54,12 +60,15 @@ def _provenance(model, config: AlignConfig) -> dict:
         "algorithm": {
             "name": "dualign-pairwise",
             "revision": ALIGN_CORE_VERSION,
+            "cache_revision": ALIGN_CACHE_REVISION,
             "configuration_sha256": hashlib.sha256(
                 config_payload.encode("utf-8")
             ).hexdigest(),
         },
         "embedding": {"provider": provider, "model": str(model_name)},
     }
+    if endpoint:
+        result["embedding"]["endpoint"] = endpoint
     if instruction:
         result["embedding"]["instruction_sha256"] = hashlib.sha256(
             instruction.encode("utf-8")
@@ -86,6 +95,13 @@ def _empty_result(source_count: int, target_count: int) -> AlignmentResult:
             "avg_similarity": 0.0,
         },
     )
+
+
+def _safe_repair_mode(strategy: str, model, quality: dict) -> tuple[str, object]:
+    """Fall back to the no-encoding strategy for structurally unsafe input."""
+    if automatic_repair_blockers(quality):
+        return "minimal", None
+    return strategy, model
 
 
 def align_documents(
@@ -129,9 +145,7 @@ def align_documents(
     if reuse_alignment and target.is_file():
         try:
             cached = load_report(target)
-            if report_matches_documents(
-                cached, path_a, path_b
-            ) and report_matches_provenance(cached, provenance):
+            if report_matches_alignment(cached, path_a, path_b, provenance):
                 cached_operations = operations_from_report(cached)
                 if reset_work_state:
                     from dualign.models.action import RepairAction
@@ -153,10 +167,13 @@ def align_documents(
                         ),
                         existing_actions,
                     )
+                    repair_strategy, repair_model = _safe_repair_mode(
+                        strategy, encoder, quality
+                    )
                     repair_log = RepairService.auto_repair(
                         state,
-                        strategy=strategy,
-                        model=encoder,
+                        strategy=repair_strategy,
+                        model=repair_model,
                         unresolved_only=preserve_work_state,
                     ).repair_log
                     report = build_report(
@@ -228,15 +245,16 @@ def align_documents(
         state = RepairState(
             AlignmentSnapshot.from_alignment(result.all_ops, lines_a, lines_b)
         )
+        repair_strategy, repair_model = _safe_repair_mode(strategy, encoder, quality)
         repair_log = RepairService.auto_repair(
-            state, strategy=strategy, model=encoder
+            state, strategy=repair_strategy, model=repair_model
         ).repair_log
 
     previous = None
     if reuse_alignment and target.is_file() and not reset_work_state:
         try:
             candidate = load_report(target)
-            if report_matches_documents(candidate, path_a, path_b):
+            if report_matches_alignment(candidate, path_a, path_b, provenance):
                 previous = candidate
         except ReportError:
             pass

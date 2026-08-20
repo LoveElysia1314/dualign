@@ -846,7 +846,6 @@ class WindowTableMixin:
         is_unreliable = qa and qa.get("quality") == "unreliable"
         if is_unreliable and not self._preview_active:
             self._on_view_mode_toggled(True)
-            # 视图模式开关也会相应更新（由 toggled 信号链触发）
 
         # 切换预览/普通模式 — 由 StatusBar 视图模式切换触发
         preview = self._preview_active

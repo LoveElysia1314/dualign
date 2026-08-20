@@ -75,7 +75,9 @@ def assess_alignment_quality(
     if anchor_density is None:
         n_true = stats.get("n_true_anchors", 0)
         n_total = n_src + n_tgt
-        anchor_density = n_true / n_total if n_total > 0 else 0.0
+        # A true anchor covers one row on each side.  Keep the fallback on the
+        # same scale as the aligner's native ``anchor_density`` statistic.
+        anchor_density = 2 * n_true / n_total if n_total > 0 else 0.0
 
     indicators = {
         "anchor_density": round(anchor_density, 4),
@@ -85,30 +87,43 @@ def assess_alignment_quality(
         "n_tgt": n_tgt,
     }
 
-    # G1 — 锚点不足
-    if anchor_density < cfg.anchor_density_min:
-        return {
-            "quality": QUALITY_UNRELIABLE,
-            "rejections": [REJECTION_LOW_ANCHOR_DENSITY],
-            "indicators": indicators,
-        }
-
-    # G2/G3 并行独立
     rejections = []
-    quality = QUALITY_OK
+
+    # G1/G2/G3 are independent evidence.  Preserve every reason so callers
+    # can make one resource-safety decision without reconstructing metrics.
+    if anchor_density < cfg.anchor_density_min:
+        rejections.append(REJECTION_LOW_ANCHOR_DENSITY)
 
     if gap_row_ratio >= cfg.gap_row_ratio_max:
-        quality = QUALITY_GAP_DOMINATED
         rejections.append(REJECTION_GAP_DOMINATED)
 
     if n_overflow_rows > 0:
         rejections.append(REJECTION_MERGE_OVERFLOW)
+
+    if REJECTION_LOW_ANCHOR_DENSITY in rejections:
+        quality = QUALITY_UNRELIABLE
+    elif REJECTION_GAP_DOMINATED in rejections:
+        quality = QUALITY_GAP_DOMINATED
+    else:
+        quality = QUALITY_OK
 
     return {
         "quality": quality,
         "rejections": rejections,
         "indicators": indicators,
     }
+
+
+def automatic_repair_blockers(assessment: dict | None) -> list[str]:
+    """Return structural risks that make automatic repair unsafe or wasteful."""
+    if not assessment:
+        return []
+    known = {
+        REJECTION_LOW_ANCHOR_DENSITY,
+        REJECTION_GAP_DOMINATED,
+        REJECTION_MERGE_OVERFLOW,
+    }
+    return [reason for reason in assessment.get("rejections", []) if reason in known]
 
 
 def is_statistical_low_score(

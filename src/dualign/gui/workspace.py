@@ -64,10 +64,9 @@ class FileQueueItem:
 
 
 class WorkspacePanel(QWidget):
-    file_pair_requested = Signal(str, str, str)
+    pair_selected = Signal(object)  # FileQueueItem，完整保留 entry 元数据
     add_queue_requested = Signal()
     doc_remove_requested = Signal()
-    entry_selected = Signal(object)  # 导航时携带 ChapterEntry 更新 _current_entry
     chapter_nav_requested = Signal(int)
 
     _RF = os.path.join(os.path.expanduser("~"), ".dualign", "recent_pairs.json")
@@ -157,7 +156,6 @@ class WorkspacePanel(QWidget):
         self._qlw = QListWidget()
         self._qlw.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._qlw.itemClicked.connect(self._on_item_clicked)
-        self._qlw.itemDoubleClicked.connect(self._on_item_double)
         self._qlw.setMinimumHeight(28)
         ql.addWidget(self._qlw, 1)
         qg.setMinimumHeight(160)
@@ -283,12 +281,7 @@ class WorkspacePanel(QWidget):
         it = item.data(Qt.ItemDataRole.UserRole)
         if it is not None and item.isSelected():
             self._selected = it
-            if it.entry is not None:
-                self.entry_selected.emit(it.entry)
-            self.file_pair_requested.emit(it.src_path, it.tgt_path, it.label)
-
-    def _on_item_double(self, item):
-        self._on_item_clicked(item)
+            self.pair_selected.emit(it)
 
     def _add_to_recent(self, lb, s, t):
         self._recent_pairs = [
@@ -403,26 +396,16 @@ class WorkspacePanel(QWidget):
         else:
             return
         self._select(nxt)
-        if nxt.entry is not None:
-            self.entry_selected.emit(nxt.entry)
-        self.file_pair_requested.emit(nxt.src_path, nxt.tgt_path, nxt.label)
+        self.pair_selected.emit(nxt)
 
     def _nav_next(self):
         if not self._queue:
             return
         if self._selected is None:
             self._select(self._queue[0])
-            if self._queue[0].entry is not None:
-                self.entry_selected.emit(self._queue[0].entry)
-            self.file_pair_requested.emit(
-                self._queue[0].src_path, self._queue[0].tgt_path, self._queue[0].label
-            )
+            self.pair_selected.emit(self._queue[0])
             return
         idx = next((i for i, q in enumerate(self._queue) if q is self._selected), -1)
         nxt = idx + 1 if idx + 1 < len(self._queue) else 0
         self._select(self._queue[nxt])
-        if self._queue[nxt].entry is not None:
-            self.entry_selected.emit(self._queue[nxt].entry)
-        self.file_pair_requested.emit(
-            self._queue[nxt].src_path, self._queue[nxt].tgt_path, self._queue[nxt].label
-        )
+        self.pair_selected.emit(self._queue[nxt])

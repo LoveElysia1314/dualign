@@ -66,6 +66,31 @@ def test_cached_encoder_only_encodes_each_repeated_miss_once(tmp_path):
     np.testing.assert_array_equal(result[0], result[1])
 
 
+def test_cached_encoder_separates_same_model_served_by_different_endpoints(tmp_path):
+    class Encoder:
+        _model = "same-model"
+        _instruction = "same-instruction"
+        _dim = 2
+
+        def __init__(self, url, value):
+            self._url = url
+            self.value = value
+            self.calls = 0
+
+        def encode(self, texts, normalize_embeddings=True):
+            self.calls += 1
+            return np.array([[self.value, 1.0] for _ in texts], dtype=np.float32)
+
+    first = Encoder("http://endpoint-a", 1.0)
+    second = Encoder("http://endpoint-b", 2.0)
+    with EmbeddingCache(str(tmp_path / "vecs.db")) as cache:
+        CachedEncoder(first, cache).encode(["text"])
+        CachedEncoder(second, cache).encode(["text"])
+
+    assert first.calls == 1
+    assert second.calls == 1
+
+
 def test_legacy_databases_migrate_idempotently_before_removal(tmp_path):
     embedding_dir = tmp_path / "emb"
     first_path = embedding_dir / "chapter-a" / "vecs.db"
