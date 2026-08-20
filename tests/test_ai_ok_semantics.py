@@ -43,8 +43,11 @@ def _repaired_state():
 
 def _ctx_with_repair():
     return ChapterContext.from_repair_state(
-        _repaired_state(), chapter_id="t1", chapter_title="测试",
-        strategy="src", model=None,
+        _repaired_state(),
+        chapter_id="t1",
+        chapter_title="测试",
+        strategy="src",
+        model=None,
     )
 
 
@@ -74,8 +77,11 @@ class TestOkConvertsToExistingRepair:
 
     def test_ok_with_initial_state_on_clean_snap_stays_ok(self):
         ctx = ChapterContext.from_repair_state(
-            RepairState(_snapshot()), chapter_id="t1", chapter_title="测试",
-            strategy="src", model=None,
+            RepairState(_snapshot()),
+            chapter_id="t1",
+            chapter_title="测试",
+            strategy="src",
+            model=None,
         )
         ex = ToolExecutor(
             ctx, model=None, initial_state=RepairState(_snapshot()), strategy="src"

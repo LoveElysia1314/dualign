@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from dualign.models.alignment_pair import AlignmentLink, AlignmentPair, DocumentReference
+from dualign.models.alignment_pair import (
+    AlignmentLink,
+    AlignmentPair,
+    DocumentReference,
+)
 from dualign.models.pair_editing import PairEditingState
 from dualign.services.alignment_io import document_sha256
 from dualign.services.pair_save import (
@@ -136,7 +140,11 @@ def test_mid_transaction_failure_rolls_back_every_target(tmp_path: Path, monkeyp
             transaction_dir=tmp_path / "transactions",
         )
 
-    assert (path_a.read_bytes(), path_b.read_bytes(), report_path.read_bytes()) == originals
+    assert (
+        path_a.read_bytes(),
+        path_b.read_bytes(),
+        report_path.read_bytes(),
+    ) == originals
 
 
 def test_recovery_rolls_back_an_interrupted_install(tmp_path: Path):
@@ -199,9 +207,7 @@ def test_save_refuses_missing_placeholder_in_document_b(tmp_path: Path):
     """译文侧占位符同样被拒绝。"""
     path_a, path_b, report_path, state = _case(tmp_path)
     placeholder = "\u27e2MISSING\u27e3"
-    edited = state.edit_link_content(
-        "L1", document_a=["甲"], document_b=[placeholder]
-    )
+    edited = state.edit_link_content("L1", document_a=["甲"], document_b=[placeholder])
 
     with pytest.raises(PairSavePlaceholderError, match="文档 B"):
         _save(edited, path_a, path_b, report_path)
@@ -225,4 +231,7 @@ def test_save_allows_embedded_missing_symbol_in_prose(tmp_path: Path):
         transaction_dir=tmp_path / "transactions",
     )
     assert result.report_sha256
-    assert path_a.read_text(encoding="utf-8") == "甲\n\n符号 " + placeholder + " 出现于文中\n"
+    assert (
+        path_a.read_text(encoding="utf-8")
+        == "甲\n\n符号 " + placeholder + " 出现于文中\n"
+    )

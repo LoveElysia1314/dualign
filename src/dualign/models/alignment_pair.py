@@ -63,6 +63,7 @@ class DocumentReference:
             )
         object.__setattr__(self, "sha256", digest)
 
+
 @dataclass(frozen=True)
 class AlignmentLink:
     """A direct correspondence between blocks in document A and document B."""
@@ -95,6 +96,7 @@ class AlignmentLink:
                     f"link {self.id}.confidence 必须位于 0 到 1 之间"
                 )
             object.__setattr__(self, "confidence", confidence)
+
 
 @dataclass(frozen=True)
 class AlignmentPair:
@@ -136,9 +138,7 @@ class AlignmentPair:
             isinstance(item, Mapping) for item in self.history
         ):
             raise AlignmentPairValidationError("history 必须是映射数组")
-        object.__setattr__(
-            self, "history", tuple(dict(item) for item in self.history)
-        )
+        object.__setattr__(self, "history", tuple(dict(item) for item in self.history))
         if not isinstance(self.analysis, Mapping):
             raise AlignmentPairValidationError("analysis 必须是映射")
         object.__setattr__(self, "analysis", dict(self.analysis))

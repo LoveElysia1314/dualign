@@ -38,9 +38,7 @@ def _diff(before: str, after: str, before_name: str, after_name: str) -> str:
         return ""
     before_lines = before.splitlines(keepends=True)
     after_lines = after.splitlines(keepends=True)
-    matcher = difflib.SequenceMatcher(
-        a=before_lines, b=after_lines, autojunk=False
-    )
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
     out = [f"--- {before_name}\n", f"+++ {after_name}\n"]
     for group in matcher.get_grouped_opcodes(3):
         first, last = group[0], group[-1]

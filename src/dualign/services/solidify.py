@@ -134,9 +134,7 @@ def _diff(before: str, after: str, name: str) -> str:
         return ""
     before_lines = before.splitlines(keepends=True)
     after_lines = after.splitlines(keepends=True)
-    matcher = difflib.SequenceMatcher(
-        a=before_lines, b=after_lines, autojunk=False
-    )
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
     out = [f"--- {name}（当前）\n", f"+++ {name}（固化后）\n"]
     for group in matcher.get_grouped_opcodes(3):
         first, last = group[0], group[-1]
@@ -360,9 +358,7 @@ def build_solidification_plan(
             }
             if not affected:
                 affected = {"a" if raw_side in {"a", "src", "source"} else "b"}
-            selected = {
-                side for side in affected if policy.includes(f"split_{side}")
-            }
+            selected = {side for side in affected if policy.includes(f"split_{side}")}
             # As with merge, a two-sided structural split must be committed as
             # a unit or remain completely represented by the repair action.
             if selected != affected:
@@ -435,9 +431,7 @@ def build_solidification_plan(
                 continue
             anchor = merge_links(link_ids, operations)
             state = state.delete_link_content(anchor)
-            applied.append(
-                {"action": action.to_dict(), "effects": ["delete_pair"]}
-            )
+            applied.append({"action": action.to_dict(), "effects": ["delete_pair"]})
             continue
 
         pending.append(_PendingAction(action, link_ids))

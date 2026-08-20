@@ -123,9 +123,7 @@ class TestTargetParamUnification:
         """占位符防线：新译文含 ⟢MISSING⟣ → 拒绝，不产生 edit 操作。"""
         ex = _executor(reviewable_ctx)
         placeholder = "\u27e2MISSING\u27e3"
-        result = ex.execute(
-            _call("edit", {"target": "1", "new_tgt": [placeholder]})
-        )
+        result = ex.execute(_call("edit", {"target": "1", "new_tgt": [placeholder]}))
         assert "占位符" in result, result
         assert "edit 拒绝" in result, result
         assert 1 not in ex.reviewed_ids

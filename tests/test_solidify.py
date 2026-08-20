@@ -269,9 +269,7 @@ def test_delete_is_solidified_but_review_markers_remain_in_history(tmp_path: Pat
         "flag",
         "ok",
     ]
-    assert saved["history"][-1]["applied_repairs"][0]["effects"] == [
-        "delete_pair"
-    ]
+    assert saved["history"][-1]["applied_repairs"][0]["effects"] == ["delete_pair"]
 
 
 def test_placeholder_is_not_a_solidification_type():
