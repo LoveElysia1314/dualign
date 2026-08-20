@@ -16,11 +16,40 @@ from __future__ import annotations
 
 import sys
 import os
+import json
 import argparse
 from pathlib import Path
 
 
-def main_gui(src_path: str = "", tgt_path: str = ""):
+def _load_gui_entries(entries_file: str):
+    """读取集成方传入的章节清单，并转换为 Dualign 的 FilePair。"""
+    if not entries_file:
+        return None
+    from dualign.common import FilePair
+
+    with open(entries_file, encoding="utf-8") as manifest_file:
+        items = json.load(manifest_file)
+    if not isinstance(items, list):
+        raise ValueError("GUI entries manifest 必须是 JSON 数组")
+    entries = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("GUI entries manifest 中的章节必须是对象")
+        entries.append(
+            FilePair(
+                entry_id=str(item.get("entry_id", "")),
+                label=str(item.get("label", "")),
+                source_path=str(item.get("source_path", "")),
+                target_path=str(item.get("target_path", "")),
+                repaired_dir=str(item.get("repaired_dir", "")),
+                report_path=str(item.get("report_path", "")),
+                metadata=dict(item.get("metadata") or {}),
+            )
+        )
+    return entries
+
+
+def main_gui(src_path: str = "", tgt_path: str = "", entries_file: str = ""):
     """启动 GUI。"""
     # ── Windows: 标记独立 AppUserModelID，确保任务栏显示自定义图标 ──
     if sys.platform == "win32":
@@ -68,9 +97,10 @@ def main_gui(src_path: str = "", tgt_path: str = ""):
 
     sys.excepthook = _global_exception_hook
 
-    window = DualignWindow()
+    entries = _load_gui_entries(entries_file)
+    window = DualignWindow(file_entries=entries)
 
-    if src_path and tgt_path:
+    if entries is None and src_path and tgt_path:
         window.load_file_pair(src_path, tgt_path, label=os.path.basename(src_path))
 
     window.show()
@@ -169,6 +199,11 @@ def main():
     p_gui = sub.add_parser("gui", help="启动图形界面")
     p_gui.add_argument("--src", default="", help="原文路径")
     p_gui.add_argument("--tgt", default="", help="译文路径")
+    p_gui.add_argument(
+        "--entries-file",
+        default="",
+        help="由集成方提供的章节清单 JSON（支持多章及独立报告目录）",
+    )
 
     # ── align ──
     p_align = sub.add_parser("align", help="对齐 + 自动修复 + 导出")
@@ -234,7 +269,11 @@ def main():
         return main_align(args.src, args.tgt, args.out, args.strategy)
 
     if args.command == "gui":
-        main_gui(src_path=args.src, tgt_path=args.tgt)
+        main_gui(
+            src_path=args.src,
+            tgt_path=args.tgt,
+            entries_file=args.entries_file,
+        )
     elif args.command == "align":
         return main_align(args.src, args.tgt, args.out, args.strategy)
     elif args.command == "promote":
@@ -313,8 +352,10 @@ def _cmd_promote(
         print(f"        原始文件备份: {result['tgt_backup']}")
         for cp in result.get("cache_paths_cleared", []):
             print(f"[模拟]  将清除缓存: {cp}")
-        report_path = os.path.join(repaired_dir, f"{entry_id}.report.json")
-        print(f"[模拟]  报告文件: {report_path} → 清除 ai_review")
+        for artifact in result.get("artifacts_invalidated", []):
+            print(f"[模拟]  将使派生产物失效: {artifact}")
+        if result.get("report_backup"):
+            print(f"[模拟]  旧报告将归档为: {result['report_backup']}")
         print()
         print("✅ 模拟完成，未执行任何修改。去掉 --dry-run 后实际执行。")
         return 0
@@ -329,8 +370,9 @@ def _cmd_promote(
     )
     for cp in result.get("cache_paths_cleared", []):
         print(f"  ✓ 缓存已清除: {cp}")
-    if result.get("report_updated"):
-        print("  ✓ report.json 已清除过期元数据")
+    if result.get("report_backup"):
+        print(f"  ✓ 旧报告已归档: {result['report_backup']}")
+    print(f"  ✓ 已使 {len(result.get('artifacts_invalidated', []))} 项派生产物失效")
     print(f"  替换后文件行数: src={result['src_count']}, tgt={result['tgt_count']}")
     print()
     print("✅ 置换完成。编码缓存保持不动（自验证命中）。")

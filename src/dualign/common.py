@@ -13,7 +13,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
-from dualign.config import _ui_session_cache_path
+from dualign.config import get_cache_root
 
 # ═══════════════════════════════════════════════════════════════
 # 哈希与缓存工具
@@ -97,6 +97,43 @@ def format_markdown_output(lines: list[str]) -> str:
     return "\n\n".join(lines) + "\n"
 
 
+def _render_logged_repairs(
+    report_path: str, raw_src: str, raw_tgt: str
+) -> Optional[tuple[list[str], list[str]]]:
+    """从报告重放校订日志；无校订日志时返回 ``None``。
+
+    报告一旦声明存在 repair_log，它就是待晋升文本的权威来源。解析或
+    重放失败必须向上传递，禁止悄悄退回可能过期的 repaired 文件。
+    """
+    if not os.path.isfile(report_path):
+        return None
+
+    import json as _json
+
+    with open(report_path, "r", encoding="utf-8") as report_file:
+        data = _json.load(report_file)
+    log_raw = data.get("repair_log", [])
+    if not log_raw:
+        return None
+
+    ops_raw = data.get("ops", [])
+    if not ops_raw:
+        raise ValueError("报告包含 repair_log，但缺少可重放的 ops")
+    if not os.path.isfile(raw_src) or not os.path.isfile(raw_tgt):
+        raise FileNotFoundError("校订日志重放所需的原始文件不存在")
+
+    from dualign.models.action import RepairAction
+    from dualign.models.state import AlignmentSnapshot
+    from dualign.services.repair import RepairService, RepairState
+
+    ops = [(tuple(item["s"]), tuple(item["t"]), float(item["sc"])) for item in ops_raw]
+    snapshot = AlignmentSnapshot.from_alignment(
+        ops, load_text_lines(raw_src), load_text_lines(raw_tgt)
+    )
+    actions = [RepairAction.from_dict(item) for item in log_raw]
+    return RepairService.render_rows(RepairState(snapshot, actions))
+
+
 # ═══════════════════════════════════════════════════════════════
 # 5. promote_repaired — 修复结果晋升置换
 # ═══════════════════════════════════════════════════════════════
@@ -113,10 +150,10 @@ def promote_repaired(
     """用修复后的文件置换源文档对（晋升操作）。
 
     步骤:
-      1. 备份原始文件（加 .bak 后缀）
-      2. 拷贝 repaired 文件覆盖原文件
-      3. 清除过期的会话缓存
-      4. 在 report.json 中清除旧对齐/AI 审校数据
+      1. 从 report.json 重放当前校订日志（若存在）
+      2. 备份原始文件（加 .bak 后缀）并原子置换
+      3. 将旧报告归档为 .pre-promote.bak
+      4. 删除依赖旧文本基线的 repaired/会话/相似度产物
 
     嵌入缓存（SQLite vecs.db）通过 content_hash 自验证，
     内容变更后自动失效，无需主动删除。
@@ -138,12 +175,13 @@ def promote_repaired(
           src_backup: str | None
           tgt_backup: str | None
           cache_paths_cleared: list[str]
-          report_updated: bool
+          report_backup: str | None
+          artifacts_invalidated: list[str]
           src_count: int
           tgt_count: int
     """
     import shutil
-    import json as _json
+    import tempfile
 
     result: Dict[str, Any] = {
         "success": False,
@@ -151,7 +189,8 @@ def promote_repaired(
         "src_backup": None,
         "tgt_backup": None,
         "cache_paths_cleared": [],
-        "report_updated": False,
+        "report_backup": None,
+        "artifacts_invalidated": [],
         "src_count": 0,
         "tgt_count": 0,
     }
@@ -159,6 +198,10 @@ def promote_repaired(
     src_path = os.path.normpath(src_path)
     tgt_path = os.path.normpath(tgt_path)
     repaired_dir = os.path.normpath(repaired_dir)
+
+    if strategy not in {"", "src", "tgt"}:
+        result["message"] = f"未知晋升策略: {strategy}"
+        return result
 
     if not os.path.isfile(src_path):
         result["message"] = f"源文件不存在: {src_path}"
@@ -169,6 +212,13 @@ def promote_repaired(
 
     repaired_src = os.path.join(repaired_dir, f"{entry_id}.source.md")
     repaired_tgt = os.path.join(repaired_dir, f"{entry_id}.target.md")
+    distinct_paths = {
+        os.path.normcase(os.path.abspath(path))
+        for path in (src_path, tgt_path, repaired_src, repaired_tgt)
+    }
+    if len(distinct_paths) != 4:
+        result["message"] = "原始文件与 repaired 文件路径发生重叠，拒绝晋升"
+        return result
 
     missing = []
     if not os.path.isfile(repaired_src):
@@ -179,33 +229,47 @@ def promote_repaired(
         result["message"] = f"找不到 repaired 文件: {missing}"
         return result
 
-    # ── report.json 路径 ──
+    # ── 计算实际待晋升内容 ──
     report_path = os.path.join(repaired_dir, f"{entry_id}.report.json")
+    try:
+        rendered = _render_logged_repairs(report_path, src_path, tgt_path)
+        if rendered is None:
+            promoted_src_lines = load_text_lines(repaired_src)
+            promoted_tgt_lines = load_text_lines(repaired_tgt)
+            src_payload = Path(repaired_src).read_bytes()
+            tgt_payload = Path(repaired_tgt).read_bytes()
+        else:
+            promoted_src_lines, promoted_tgt_lines = rendered
+            src_payload = format_markdown_output(promoted_src_lines).encode("utf-8")
+            tgt_payload = format_markdown_output(promoted_tgt_lines).encode("utf-8")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        result["message"] = f"无法准备校订结果: {exc}"
+        return result
 
-    # ── 晋升前：从 report.json 重建并重导出 repaired 文件 ──
-    # 确保 AI 校订结果已正确应用到 repaired 输出，即使磁盘上的
-    # repaired 文件是旧的也能正确晋升。此操作须在 strategy 检查
-    # 之前执行，否则 strategy 会基于旧文件做判断。
-    refresh_repaired_from_report(
-        report_path, repaired_src, repaired_tgt, src_path, tgt_path
-    )
+    if len(promoted_src_lines) != len(promoted_tgt_lines):
+        result["message"] = (
+            "校订结果行数不一致: "
+            f"src={len(promoted_src_lines)}, tgt={len(promoted_tgt_lines)}"
+        )
+        return result
+
+    result["src_count"] = len(promoted_src_lines)
+    result["tgt_count"] = len(promoted_tgt_lines)
 
     # ── strategy 筛选：通过 content_hash 比对 repaired 与 raw 的对应侧 ──
     if strategy:
         _strategy_ok = True
         _reason = ""
-        repaired_src_lines = load_text_lines(repaired_src)
-        repaired_tgt_lines = load_text_lines(repaired_tgt)
         raw_src_lines = load_text_lines(src_path)
         raw_tgt_lines = load_text_lines(tgt_path)
 
         if strategy == "src":
             # 仅原文侧未变时才晋升：repaired.src ≈ raw.src（hash 一致）
-            if content_hash(repaired_src_lines) != content_hash(raw_src_lines):
+            if content_hash(promoted_src_lines) != content_hash(raw_src_lines):
                 _strategy_ok = False
                 _reason = "原文内容已变化（strategy=src 时仅原文未变才允许晋升）"
         elif strategy == "tgt":
-            if content_hash(repaired_tgt_lines) != content_hash(raw_tgt_lines):
+            if content_hash(promoted_tgt_lines) != content_hash(raw_tgt_lines):
                 _strategy_ok = False
                 _reason = "译文内容已变化（strategy=tgt 时仅译文未变才允许晋升）"
 
@@ -213,80 +277,97 @@ def promote_repaired(
             result["message"] = f"策略拒绝晋升: {_reason}"
             return result
 
-    report_exists = os.path.isfile(report_path)
-
-    # ── 会话缓存：{cache_root}/session/{entry_id}.json ──
-    session_path = _ui_session_cache_path(entry_id)
+    report_backup = report_path + ".pre-promote.bak"
+    sim_path = report_path.replace(".report.json", ".sim.npy")
+    session_path = os.path.join(get_cache_root(), "session", f"{entry_id}.json")
+    derived_paths = [repaired_src, repaired_tgt, report_path, sim_path, session_path]
 
     if dry_run:
         result["src_backup"] = src_path + ".bak"
         result["tgt_backup"] = tgt_path + ".bak"
-        _dry_cache = []
-        if os.path.isfile(session_path):
-            _dry_cache.append(session_path)
-        result["cache_paths_cleared"] = _dry_cache
-        if report_exists:
-            result["message"] = "模拟模式，将清除 report.json 中的 ai_review"
-        else:
-            result["message"] = "模拟模式，未执行任何修改"
+        if os.path.isfile(report_path):
+            result["report_backup"] = report_backup
+        result["artifacts_invalidated"] = [
+            path for path in derived_paths if os.path.isfile(path)
+        ]
+        result["cache_paths_cleared"] = [
+            path for path in (sim_path, session_path) if os.path.isfile(path)
+        ]
+        result["message"] = "模拟模式，未执行任何修改"
         result["success"] = True
         return result
 
-    # ── 备份原始文件 ──
-    shutil.copy2(src_path, src_path + ".bak")
-    shutil.copy2(tgt_path, tgt_path + ".bak")
-    result["src_backup"] = src_path + ".bak"
-    result["tgt_backup"] = tgt_path + ".bak"
-
-    # ── 拷贝 repaired → 覆盖原始 ──
-    shutil.copy2(repaired_src, src_path)
-    shutil.copy2(repaired_tgt, tgt_path)
-
-    # ── 清除会话缓存（UI 状态过期）──
-    # 编码缓存（align_emb_cache.npz）通过 content_hash 自验证，保留。
-    cleared: List[str] = []
-    if os.path.isfile(session_path):
-        try:
-            os.remove(session_path)
-            cleared.append(session_path)
-        except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                f"清除会话缓存失败: {session_path}: {e}"
+    # ── 同目录临时文件 + os.replace，避免留下半写入的 raw 文件 ──
+    temp_paths: list[str] = []
+    try:
+        for destination, payload in (
+            (src_path, src_payload),
+            (tgt_path, tgt_payload),
+        ):
+            fd, temp_path = tempfile.mkstemp(
+                prefix=f".{entry_id}.promote-", dir=os.path.dirname(destination)
             )
+            temp_paths.append(temp_path)
+            with os.fdopen(fd, "wb") as temp_file:
+                temp_file.write(payload)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            shutil.copystat(destination, temp_path)
+
+        result["src_backup"] = src_path + ".bak"
+        result["tgt_backup"] = tgt_path + ".bak"
+        shutil.copy2(src_path, result["src_backup"])
+        shutil.copy2(tgt_path, result["tgt_backup"])
+
+        os.replace(temp_paths[0], src_path)
+        temp_paths.pop(0)
+        try:
+            os.replace(temp_paths[0], tgt_path)
+            temp_paths.pop(0)
+        except OSError:
+            shutil.copy2(result["src_backup"], src_path)
+            raise
+
+        # 报告保存完整审计记录，但移出活动路径，确保下次真正重新对齐。
+        if os.path.isfile(report_path):
+            try:
+                os.replace(report_path, report_backup)
+                result["report_backup"] = report_backup
+            except OSError:
+                shutil.copy2(result["src_backup"], src_path)
+                shutil.copy2(result["tgt_backup"], tgt_path)
+                raise
+    except OSError as exc:
+        result["message"] = f"晋升置换失败，原始文件已回滚: {exc}"
+        return result
+    finally:
+        for temp_path in temp_paths:
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
+
+    # report 已归档，余下派生产物即使个别清理失败也不会被当作有效对齐。
+    invalidated = [report_path] if result["report_backup"] else []
+    cleanup_errors = []
+    cleared = []
+    for path in (repaired_src, repaired_tgt, sim_path, session_path):
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            invalidated.append(path)
+            if path in {sim_path, session_path}:
+                cleared.append(path)
+        except OSError as exc:
+            cleanup_errors.append(f"{path}: {exc}")
+    result["artifacts_invalidated"] = invalidated
     result["cache_paths_cleared"] = cleared
 
-    # ── 更新 report.json：清空 ai_review ──
-    if report_exists:
-        try:
-            with open(report_path, "r", encoding="utf-8") as f:
-                report_data = _json.load(f)
-            dirty = False
-            if "ai_review" in report_data:
-                del report_data["ai_review"]
-                dirty = True
-            if dirty:
-                with open(report_path, "w", encoding="utf-8") as f:
-                    _json.dump(
-                        report_data, f, ensure_ascii=False, separators=(",", ":")
-                    )
-                result["report_updated"] = True
-        except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                f"更新 report.json 失败: {report_path}: {e}"
-            )
-
-    # ── 新文件行数统计 ──
-    with open(src_path, encoding="utf-8") as f:
-        result["src_count"] = len(f.readlines())
-    with open(tgt_path, encoding="utf-8") as f:
-        result["tgt_count"] = len(f.readlines())
-
     result["success"] = True
-    result["message"] = "置换完成。原始文件已备份为 .bak。"
+    result["message"] = "置换完成；旧对齐与校订产物已失效，请重新对齐。"
+    if cleanup_errors:
+        result["message"] += " 未能清理: " + "; ".join(cleanup_errors)
     return result
 
 
@@ -296,66 +377,29 @@ def refresh_repaired_from_report(
     repaired_tgt: str,
     raw_src: str,
     raw_tgt: str,
-):
+) -> bool:
     """从 report.json 重建 repaired 文件（含 AI 校订结果）。
 
     仅当 report.json 存在且含非空 repair_log 时才执行重导出。
     重导出使用 raw 文件作为原始文本基准，report.json 中的 ops
     和 repair_log 描述了对齐及所有修复操作。
 
-    此函数供两方面使用：
-      1. promote_repaired() —— 晋升前确保 AI 校订已反映到导出文件
-      2. 消费端 ai_repair_chapter() —— AI 校订完成后即时更新导出文件
+    消费端在 AI 校订完成后调用本函数即时更新导出文件；晋升操作复用
+    同一套日志重放逻辑，但直接生成原子置换所需的内存载荷。
     """
-    if not os.path.isfile(report_path):
-        return
-    try:
-        import json as _json
+    rendered = _render_logged_repairs(report_path, raw_src, raw_tgt)
+    if rendered is None:
+        return False
 
-        with open(report_path, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-    except Exception:
-        return
+    src_out, tgt_out = rendered
+    os.makedirs(os.path.dirname(repaired_src), exist_ok=True)
+    with open(repaired_src, "w", encoding="utf-8") as src_file:
+        src_file.write(format_markdown_output(src_out))
+    with open(repaired_tgt, "w", encoding="utf-8") as tgt_file:
+        tgt_file.write(format_markdown_output(tgt_out))
 
-    ops_raw = data.get("ops", [])
-    log_raw = data.get("repair_log", [])
-    if not ops_raw or not log_raw:
-        return
-
-    # 读取 raw 文件作为基线
-    if not os.path.isfile(raw_src) or not os.path.isfile(raw_tgt):
-        return
-    sl = load_text_lines(raw_src)
-    tl = load_text_lines(raw_tgt)
-
-    try:
-        from dualign.services.repair import RepairState, RepairService
-        from dualign.models.state import AlignmentSnapshot
-        from dualign.models.action import RepairAction
-
-        ops = [
-            (
-                tuple(o["s"]),
-                tuple(o["t"]),
-                float(o["sc"]),
-            )
-            for o in ops_raw
-        ]
-        snap = AlignmentSnapshot.from_alignment(ops, sl, tl)
-        log = [RepairAction.from_dict(a) for a in log_raw]
-        state = RepairState(snap, log)
-
-        src_out, tgt_out = RepairService.render_rows(state)
-        os.makedirs(os.path.dirname(repaired_src), exist_ok=True)
-        with open(repaired_src, "w", encoding="utf-8") as f:
-            f.write(format_markdown_output(src_out))
-        with open(repaired_tgt, "w", encoding="utf-8") as f:
-            f.write(format_markdown_output(tgt_out))
-
-        # 写入 AI 审校完成状态
-        set_ai_review(report_path, "completed", "")
-    except Exception:
-        pass
+    set_ai_review(report_path, "completed", "")
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════

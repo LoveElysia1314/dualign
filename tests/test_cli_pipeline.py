@@ -147,6 +147,8 @@ class TestCliPipeline:
         assert len(report["ops"]) > 0
         assert report["stats"]["n_source"] == 3
         assert report["stats"]["n_target"] == 3
+        assert report["quality"]["level"] == result["quality"]
+        assert "quality" not in report["quality"]
 
         # 检查输出 .md 文件
         src_out = result.get("src_path", "")

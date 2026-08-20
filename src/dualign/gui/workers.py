@@ -7,6 +7,7 @@ Dualign — GUI 后台工作线程
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -25,9 +26,7 @@ from dualign.common import (
     load_text_lines,
     content_hash as _content_hash,
 )
-from dualign.config import (
-    get_embedding_cache_dir,
-)
+from dualign.config import get_embedding_cache_path
 from dualign.services.embedding import (
     load_model_for_provider,
     _try_lazy_load_model,
@@ -60,6 +59,7 @@ class EncodeThread(QThread):
         str,
     )
     text_ready_signal = Signal(str, str, list, list)
+    cache_hit_signal = Signal(object)
     error_signal = Signal(str, str)
 
     def __init__(
@@ -70,6 +70,7 @@ class EncodeThread(QThread):
         src_lines=None,
         tgt_lines=None,
         entry_id="",
+        report_path="",
     ):
         super().__init__(parent)
         self.src_path = src_path
@@ -77,6 +78,7 @@ class EncodeThread(QThread):
         self._src_lines = src_lines
         self._tgt_lines = tgt_lines
         self.entry_id = entry_id
+        self.report_path = report_path
         self.time_s = 0.0
         self._stop_event = threading.Event()
 
@@ -101,7 +103,23 @@ class EncodeThread(QThread):
             tgt_lines = load_text_lines(self.tgt_path)
         src_hash = _content_hash(src_lines)
         tgt_hash = _content_hash(tgt_lines)
+
+        # 已完成章节的 report.json 足以恢复校订视图。缓存探测必须早于
+        # 模型加载和嵌入编码，否则“打开已对齐章节”仍会无谓等待模型。
+        cached = self._load_cached_alignment(src_hash, tgt_hash)
+        if cached is not None:
+            self.status_signal.emit("✓ 对齐缓存命中，正在恢复校订会话…")
+            self.cache_hit_signal.emit(
+                (cached, src_lines, tgt_lines, src_hash, tgt_hash)
+            )
+            return
+
+        # 只有缓存 miss 才先渲染逐行预览；命中时直接渲染最终对齐表，
+        # 避免同一大章节连续构造两张表。
         self.text_ready_signal.emit(src_hash, tgt_hash, src_lines, tgt_lines)
+        self.status_signal.emit("未找到可用的对齐缓存，正在准备编码…")
+        if self._stop_event.is_set():
+            return
 
         # ── 加载模型 ──
         model = _try_lazy_load_model()
@@ -119,9 +137,7 @@ class EncodeThread(QThread):
             return
 
         # ── CachedEncoder: 统一缓存代理 ──
-        cache_dir = get_embedding_cache_dir(self.entry_id)
-        db_path = os.path.join(cache_dir, "vecs.db")
-        cache = EmbeddingCache(db_path)
+        cache = EmbeddingCache(get_embedding_cache_path())
         try:
             cenc = CachedEncoder(model, cache)
 
@@ -147,6 +163,31 @@ class EncodeThread(QThread):
             src_hash,
             tgt_hash,
         )
+
+    def _load_cached_alignment(self, src_hash: str, tgt_hash: str):
+        """在工作线程中验证并恢复 report.json 中的对齐结果。"""
+        if not self.report_path or not os.path.isfile(self.report_path):
+            return None
+        try:
+            with open(self.report_path, encoding="utf-8") as report_file:
+                report = json.load(report_file)
+            if report.get("src_hash") != src_hash or report.get("tgt_hash") != tgt_hash:
+                return None
+            ops = report.get("ops") or []
+            stats = report.get("stats") or {}
+            if not ops:
+                return None
+            return AlignmentResult(
+                all_ops=[
+                    (tuple(op["s"]), tuple(op["t"]), float(op["sc"])) for op in ops
+                ],
+                anchors=[],
+                anchor_op_indices={},
+                stats=stats,
+            )
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            # 损坏/旧格式报告只视为 miss，随后走正常编码与对齐流程。
+            return None
 
 
 # ── 对齐线程 ────────────────────────────────────────────────
@@ -203,10 +244,8 @@ class AlignWorker(QThread):
         # ── CachedEncoder: 合并文本编码也走缓存 ──
         encode_fn = self.encode_fn
         _cache_to_close = None
-        if self.entry_id and encode_fn:
-            cache_dir = get_embedding_cache_dir(self.entry_id)
-            db_path = os.path.join(cache_dir, "vecs.db")
-            cache = EmbeddingCache(db_path)
+        if encode_fn:
+            cache = EmbeddingCache(get_embedding_cache_path())
             _cache_to_close = cache
             # 从 encode_fn 反查 model 引用（window_actions 传入的是 model.encode）
             from dualign.services.embedding import _try_lazy_load_model

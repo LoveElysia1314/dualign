@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dualign.config import (
     get_report_cache_dir,
-    get_embedding_cache_dir,
+    get_embedding_cache_path,
 )
 from dualign.common import (
     load_text_lines,
@@ -59,15 +59,13 @@ def align_chapter(
 
     entry_id = Path(src_path).stem.split(".")[0]
     cfg = config or AlignConfig()
-    cache_dir = get_embedding_cache_dir(entry_id)
 
     # ── 空文本 ──
     if not sl or not tl:
         return _handle_empty(sl, tl, entry_id, repaired_dir)
 
     # ── 尝试嵌入缓存（SQLite 行级）──
-    db_path = os.path.join(cache_dir, "vecs.db")
-    ec = EmbeddingCache(db_path)
+    ec = EmbeddingCache(get_embedding_cache_path())
     try:
         return _align_with_cache(
             ec,
@@ -308,7 +306,7 @@ def _build_report(
             "src_hash": src_hash,
             "tgt_hash": tgt_hash,
             "quality": {
-                "quality": quality,
+                "level": quality,
                 "rejections": rejections,
                 "indicators": indicators,
             },

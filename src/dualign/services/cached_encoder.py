@@ -35,7 +35,7 @@ class CachedEncoder:
         """
         Args:
             encoder: OllamaEncoder | OpenAICompatibleEncoder 实例
-            cache: EmbeddingCache 实例（通常指向 {entry_id}/vecs.db）
+            cache: EmbeddingCache 实例（通常指向全局 emb/vecs.db）
             model_name: 存入缓存的模型标识。空时自动从 encoder._model 读取
         """
         self._encoder = encoder
@@ -94,18 +94,18 @@ class CachedEncoder:
         cached = self._cache.get_batch(hashes)
 
         # ── 收集 miss ──
-        miss_texts: list[str] = []
-        miss_hashes: list[str] = []
+        unique_misses: dict[str, str] = {}
         for h, t in zip(hashes, texts):
             if h in cached:
                 self._hit_count += 1
             else:
                 self._miss_count += 1
-                miss_texts.append(t)
-                miss_hashes.append(h)
+                unique_misses.setdefault(h, t)
 
         # ── 编码 miss ──
-        if miss_texts:
+        if unique_misses:
+            miss_hashes = list(unique_misses)
+            miss_texts = list(unique_misses.values())
             miss_embs = np.array(
                 self._encoder.encode(miss_texts, normalize_embeddings=True)
             )

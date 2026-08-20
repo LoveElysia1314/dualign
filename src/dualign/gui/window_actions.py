@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from dualign.core import AlignmentResult
-from dualign.common import load_text_lines, content_hash
+from dualign.common import content_hash
 from dualign.models.state import AlignmentSnapshot
 from dualign.models.action import RepairAction
 from dualign.services.repair import (
@@ -196,73 +196,53 @@ class WindowActionsMixin:
             _entry_id = Path(src_path).stem.split(".")[0]
         self._current_entry_id = _entry_id
 
-        # ── 初始化 SimilarityScorer（行级嵌入缓存 + 评分器）──
-        # 在编码/对齐之前创建，确保任何需要评分的地方都能正常工作
+        # ── 初始化 SimilarityScorer（实际模型仍按需延迟加载）──
         from dualign.services.similarity import SimilarityScorer
 
         self._scorer = SimilarityScorer(entry_id=self._current_entry_id)
 
-        # ── 尝试从 report.json 恢复对齐缓存 ──
-        self.src_lines = load_text_lines(src_path)
-        self.tgt_lines = load_text_lines(tgt_path)
-        _result = None
-        _report_path = self._session_path()
-        if os.path.isfile(_report_path):
-            try:
-                with open(_report_path, encoding="utf-8") as _f:
-                    _r = json.load(_f)
-
-                if _r.get("ops") and _r.get("src_hash"):
-                    if _r["src_hash"] == content_hash(self.src_lines) and _r[
-                        "tgt_hash"
-                    ] == content_hash(self.tgt_lines):
-                        _ops_raw = _r["ops"]
-                        _stats = _r.get("stats", {})
-                        _all_ops = [
-                            (
-                                tuple(o["s"]),
-                                tuple(o["t"]),
-                                float(o["sc"]),
-                            )
-                            for o in _ops_raw
-                        ]
-                        _result = AlignmentResult(
-                            all_ops=_all_ops,
-                            anchors=[],
-                            anchor_op_indices={},
-                            stats=_stats,
-                        )
-            except Exception:
-                import traceback as _tb
-
-                _tb.print_exc()
-                _result = None
-
-        if _result is not None:
-            result = _result
-            # 直接进入对齐完成阶段，跳过编码
-            self._ensure_table_in_stacked()
-            self._show_table()
-            self._on_align_done(result)
-            self._update_feature_gating()
-            return
-
-        # ── 缓存未命中 → 编码 + 对齐 ──
+        # 文本读取、哈希计算与 report 缓存探测均放到工作线程；GUI 先进入
+        # 锁定预览态，避免大章节/网络模型准备期间冻结主事件循环。
         from dualign.gui.workers import EncodeThread
 
-        # 欢迎页显示对齐进度
         if hasattr(self, "_welcome") and self._welcome is not None:
-            self._welcome.set_aligning("正在编码…")
+            self._welcome.set_aligning("正在读取并检查缓存…")
 
-        self._status("编码中...")
-        QApplication.processEvents()
+        self._preview_active = True
+        self._status_bar.set_view_mode(True)
+        self._status_bar.set_view_mode_enabled(False)
+        self._status_bar.set_preview_active(True, phase="正在读取…")
+        self._status("正在读取并检查缓存…")
 
-        self._enc_thread = EncodeThread(src_path, tgt_path, entry_id=_entry_id)
-        self._enc_thread.status_signal.connect(lambda msg: self._status(msg))
+        self._enc_thread = EncodeThread(
+            src_path,
+            tgt_path,
+            entry_id=_entry_id,
+            report_path=self._session_path(),
+        )
+        self._enc_thread.status_signal.connect(self._on_prepare_status)
         self._enc_thread.text_ready_signal.connect(self._on_text_ready)
+        self._enc_thread.cache_hit_signal.connect(self._on_alignment_cache_hit)
         self._enc_thread.finished_signal.connect(self._on_encoded)
         self._enc_thread.error_signal.connect(self._on_worker_error)
         self._enc_thread.start()
+
+    def _on_prepare_status(self, message: str):
+        """同步后台准备阶段到日志和预览锁定提示。"""
+        self._status(message)
+        if not self._preview_active:
+            return
+        if "缓存命中" in message:
+            phase = "正在恢复缓存…"
+        elif "模型加载" in message:
+            phase = "正在加载模型…"
+        elif "编码完成" in message:
+            phase = "正在对齐…"
+        elif "编码" in message or "缓存" in message:
+            phase = "正在编码…"
+        else:
+            phase = "正在准备…"
+        self._status_bar.set_preview_active(True, phase=phase)
 
     def load_from_provider(self, entries: List[Any]):
         """从 FileListProvider 加载章节列表。"""
@@ -340,13 +320,29 @@ class WindowActionsMixin:
         if op_id != self._load_op_id:
             return
         self.src_lines, self.tgt_lines = src_lines, tgt_lines
+        self._src_hash, self._tgt_hash = _src_hash, _tgt_hash
         self._preview_scores = None
         self._ensure_table_in_stacked()
         self._show_table()
         self._switch_table_mode(True)
         self._preview_active = True
-        self._status_bar.set_preview_active(True, phase="正在编码…")
+        self._status_bar.set_view_mode_enabled(False)
+        self._status_bar.set_preview_active(True, phase="正在检查缓存…")
         self._render_preview()
+
+    def _on_alignment_cache_hit(self, payload):
+        """后台确认 report 缓存有效后，直接恢复校订态而不加载模型。"""
+        op_id = getattr(self, "_current_load_op_id", 0)
+        if op_id != self._load_op_id:
+            return
+        result, src_lines, tgt_lines, src_hash, tgt_hash = payload
+        self.src_lines, self.tgt_lines = src_lines, tgt_lines
+        self._src_hash, self._tgt_hash = src_hash, tgt_hash
+        self._status_bar.set_preview_active(True, phase="正在恢复缓存…")
+        self._status("对齐缓存命中", "success")
+        self._ensure_table_in_stacked()
+        self._show_table()
+        self._on_align_done(result)
 
     def _on_encoded(self, se, te, sl, tl, sh, th):
         """EncodeThread 完成后回调（接收 6 个参数）。存到实例变量，启动对齐。
@@ -379,16 +375,6 @@ class WindowActionsMixin:
             self._start_align()
         except Exception as e:
             self._show_error("编码完成回调", e)
-
-    def _align_cache_dir(self) -> str:
-        """返回对应当前章节的统一缓存目录。"""
-        from dualign.config import get_embedding_cache_dir
-
-        src_path = getattr(self, "_src_path", "")
-        entry_id = Path(src_path).stem.split(".")[0] if src_path else "_unknown"
-        d = get_embedding_cache_dir(entry_id)
-        os.makedirs(d, exist_ok=True)
-        return d
 
     def _session_cache_path(self) -> str:
         """修复会话路径，位于 repaired_dir 下，与编码缓存分离。"""
@@ -630,6 +616,8 @@ class WindowActionsMixin:
                 # 同步视图模式开关
                 self._status_bar.set_view_mode(False)
 
+            self._status_bar.set_view_mode_enabled(True)
+
             self._ensure_table_in_stacked()
             self._show_table()
             self._refresh()
@@ -794,12 +782,10 @@ class WindowActionsMixin:
         QApplication.processEvents()
 
         # 创建嵌入缓存，使 split 产生的新文本被缓存
-        from dualign.config import get_embedding_cache_dir
+        from dualign.config import get_embedding_cache_path
         from dualign.services.embedding_cache import EmbeddingCache
 
-        ec = EmbeddingCache(
-            os.path.join(get_embedding_cache_dir(self._current_entry_id), "vecs.db")
-        )
+        ec = EmbeddingCache(get_embedding_cache_path())
         try:
             state = RepairService.apply_split(
                 self._repair_state, snap_i, side, self._model, cache=ec
@@ -1279,12 +1265,10 @@ class WindowActionsMixin:
         self._undo_stack.append(self._repair_state)
 
         # 创建嵌入缓存，使自动修复中的 split 产生的新文本被缓存
-        from dualign.config import get_embedding_cache_dir
+        from dualign.config import get_embedding_cache_path
         from dualign.services.embedding_cache import EmbeddingCache
 
-        ec = EmbeddingCache(
-            os.path.join(get_embedding_cache_dir(self._current_entry_id), "vecs.db")
-        )
+        ec = EmbeddingCache(get_embedding_cache_path())
 
         self._auto_repair_worker = AutoRepairWorker(
             self._repair_state, self._strategy, model=self._model, cache=ec
@@ -1355,9 +1339,10 @@ class WindowActionsMixin:
         # ── 用当前 strategy 做筛选 ──
         from dualign.gui.settings import KEY_STRATEGY
 
-        strategy = (
+        repair_strategy = (
             self._config.get(KEY_STRATEGY, "src") if hasattr(self, "_config") else "src"
         )
+        strategy = repair_strategy if repair_strategy in {"src", "tgt"} else ""
         strategy_label = {"src": "仅原文未变", "tgt": "仅译文未变"}.get(
             strategy, "无条件"
         )
@@ -1409,7 +1394,8 @@ class WindowActionsMixin:
                 msg_lines.append(f"  • {cp}")
         msg_lines.append("")
         msg_lines.append("编码缓存保持不动（自验证命中，自动失效）。")
-        msg_lines.append("report.json 中的旧对齐元数据和 AI 审校记录将被清除。")
+        msg_lines.append("旧报告将归档，活动对齐/校订产物将失效。")
+        msg_lines.append("固化后将自动基于新原文重新对齐。")
         msg_lines.append("")
         msg_lines.append("此操作不可逆（除非手动恢复 .bak 文件）。")
         msg_lines.append("确认固化？")
@@ -1448,7 +1434,7 @@ class WindowActionsMixin:
             f"  原文: {result['src_count']} 行\n"
             f"  译文: {result['tgt_count']} 行\n\n"
             f"已清除 {n_cache} 项会话缓存\n"
-            f"{'report.json 元数据已清理' if result.get('report_updated') else ''}\n"
+            f"{'旧报告已归档' if result.get('report_backup') else ''}\n"
             f"编码缓存保留（自动失效）\n"
             f"原始文件已备份为 .bak",
         )
@@ -1456,6 +1442,8 @@ class WindowActionsMixin:
             f"固化完成: {result['src_count']} 行原文 / {result['tgt_count']} 行译文",
             "success",
         )
+        label = getattr(getattr(self, "_current_entry", None), "label", entry_id)
+        self.load_file_pair(src_path, tgt_path, label)
 
     def _on_undo(self):
         """撤销 — 恢复位置 + 同步 AiProposalStore。
@@ -1831,6 +1819,9 @@ class WindowActionsMixin:
             f"{context}\n\n完整 traceback 已输出到终端。",
         )
         self._safe_status(f"✗ 后台异常: {context}")
+        if hasattr(self, "_status_bar") and self._status_bar is not None:
+            self._status_bar.set_view_mode_enabled(True)
+            self._status_bar.set_preview_active(True, phase="准备失败")
 
     def _on_show_all_snaps(self):
         """空状态页的「查看全部文本对」按钮回调。

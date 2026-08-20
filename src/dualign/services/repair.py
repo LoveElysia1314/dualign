@@ -384,6 +384,9 @@ class RepairState:
     _snapshot: AlignmentSnapshot
     _repair_log: List[RepairAction] = field(default_factory=list)
     _ai_proposal_store: AiProposalStore = field(default_factory=AiProposalStore)
+    _current_cache: Optional[ChapterState] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     # ── 属性 ──
 
@@ -413,8 +416,10 @@ class RepairState:
 
     @property
     def current(self) -> ChapterState:
-        """通过 replay() 每次重新计算当前状态。"""
-        return replay(self._snapshot, self._repair_log)
+        """返回当前章节状态；RepairState 不可变，因此可安全复用 replay 结果。"""
+        if self._current_cache is None:
+            self._current_cache = replay(self._snapshot, self._repair_log)
+        return self._current_cache
 
     @property
     def ai_proposal_store(self) -> AiProposalStore:
@@ -761,25 +766,17 @@ class RepairService:
 
         返回: (src_out_lines, tgt_out_lines, scores) — 长度相等，全 1:1。
         """
-        src_emb = np.array(model.encode(src_lines, normalize_embeddings=True))
-        tgt_emb = np.array(model.encode(tgt_lines, normalize_embeddings=True))
-
-        # 缓存本次编码的嵌入
         if cache_dir:
-            try:
-                from dualign.services.embedding_cache import EmbeddingCache
-                from dualign.services.cached_encoder import CachedEncoder
+            from dualign.services.embedding_cache import EmbeddingCache
+            from dualign.services.cached_encoder import CachedEncoder
 
-                ec = EmbeddingCache(os.path.join(cache_dir, "vecs.db"))
-                try:
-                    cenc = CachedEncoder(model, ec)
-                    # 始终通过 CachedEncoder 查缓存，有则复用，无则编码
-                    src_emb = cenc.encode(src_lines)
-                    tgt_emb = cenc.encode(tgt_lines)
-                finally:
-                    ec.close()
-            except Exception:
-                pass
+            with EmbeddingCache(os.path.join(cache_dir, "vecs.db")) as cache:
+                encoder = CachedEncoder(model, cache)
+                src_emb = encoder.encode(src_lines)
+                tgt_emb = encoder.encode(tgt_lines)
+        else:
+            src_emb = np.array(model.encode(src_lines, normalize_embeddings=True))
+            tgt_emb = np.array(model.encode(tgt_lines, normalize_embeddings=True))
         result = align(
             src_lines,
             tgt_lines,

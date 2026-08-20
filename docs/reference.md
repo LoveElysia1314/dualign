@@ -156,7 +156,7 @@ model = OpenAICompatibleEncoder("http://localhost:1234", "your-model", api_key="
 
 | 类别       | 文件                     | 默认位置                       |
 | ---------- | ------------------------ | ------------------------------ |
-| 嵌入缓存   | `vecs.db` (SQLite)       | `{cache_root}/emb/{entry_id}/` |
+| 嵌入缓存   | `vecs.db` (SQLite)       | `{cache_root}/emb/`            |
 | 报告       | `{entry_id}.report.json` | `{cache_root}/reports/`        |
 | 修复后原文 | `{entry_id}.source.md`   | 输出目录                       |
 | 修复后译文 | `{entry_id}.target.md`   | 输出目录                       |
@@ -166,6 +166,12 @@ from dualign import get_cache_root, repair_session_path
 
 get_cache_root()                     # 缓存根目录
 repair_session_path(entry_id)        # 报告文件路径
+```
+
+从旧版的分章缓存升级时，可在校验后移除旧库：
+
+```bash
+uv run python scripts/migrate_embedding_cache.py --remove-legacy
 ```
 
 ### 2.3 核心对齐 API

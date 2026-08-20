@@ -70,75 +70,24 @@ class OllamaEncoder:
             self._session = requests.Session()
         return self._session
 
-    _TOKENIZE_RETRY_STATUS = (400,)
-    _TOKENIZE_RETRY_ATTEMPTS = 5
-    _TOKENIZE_RETRY_DELAYS = (2.0, 3.0, 5.0, 8.0, 12.0)
+    _TOKENIZE_RETRY_DELAYS = (1.0, 2.0)
 
     def _post_embed(self, batch):
-        """POST /api/embed，对 Ollama tokenizer 子进程瞬时故障自动重试。
-
-        Ollama 的 /api/embed 在内部 tokenizer 服务（127.0.0.1:123xx）未就绪
-        或瞬时崩溃时会返回 400，错误体含 "tokenize"。这是临时性故障，
-        通常下一次重试即可恢复。此处对这类 400 自动重试最多 3 次。
-        """
-        import requests as _requests
-        import time as _time
-
-        last_error = None
-        attempts = self._TOKENIZE_RETRY_ATTEMPTS
-        for attempt in range(attempts):
-            try:
-                # 单次请求持锁：同一时刻仅 1 个 /api/embed 请求在途，
-                # 避免并发触发 Ollama tokenizer 过载；重试等待期间释放锁，
-                # 其他章节的请求可插入，不长时间独占。
-                with _OLLAMA_ENCODE_LOCK:
-                    resp = self.session.post(
-                        f"{self._url}/api/embed",
-                        json={"model": self._model, "input": batch},
-                        timeout=120,
-                    )
-                    resp.raise_for_status()
-                return resp
-            except _requests.exceptions.HTTPError as e:
-                status = getattr(resp, "status_code", 0)
-                body = getattr(resp, "text", "") or ""
-                is_tokenize_issue = (
-                    status in self._TOKENIZE_RETRY_STATUS and "tokenize" in body
-                )
-                if is_tokenize_issue and attempt < attempts - 1:
-                    delay = self._TOKENIZE_RETRY_DELAYS[
-                        min(attempt, len(self._TOKENIZE_RETRY_DELAYS) - 1)
-                    ]
-                    logger.warning(
-                        "Ollama tokenizer 瞬时故障 (400), %.1fs 后重试 %d/%d",
-                        delay,
-                        attempt + 1,
-                        attempts,
-                    )
-                    _time.sleep(delay)
-                    last_error = e
-                    continue
-                raise
-            except (
-                _requests.exceptions.SSLError,
-                _requests.exceptions.ConnectTimeout,
-                _requests.exceptions.ConnectionError,
-                _requests.exceptions.Timeout,
-                _requests.exceptions.MissingSchema,
-                _requests.exceptions.InvalidSchema,
-                _requests.exceptions.InvalidURL,
-                _requests.exceptions.URLRequired,
-                _requests.exceptions.RequestException,
-            ):
-                raise
-        # 理论不可达：attempts > 0 时最后一次 is_tokenize_issue 会 raise
-        raise last_error
+        """串行发送单个 /api/embed 请求。"""
+        with _OLLAMA_ENCODE_LOCK:
+            resp = self.session.post(
+                f"{self._url}/api/embed",
+                json={"model": self._model, "input": batch},
+                timeout=120,
+            )
+            resp.raise_for_status()
+        return resp
 
     def encode(
         self,
         sentences,
         normalize_embeddings=True,
-        batch_size=256,
+        batch_size=128,
         stop_event=None,
         **kwargs,
     ):
@@ -162,11 +111,11 @@ class OllamaEncoder:
 
         # ── 档位化 batch 收缩：仅当估算整批字符超限时才收缩到固定档位 ──
         # 实测 qwen3-embedding:0.6b 单请求约 100K 字符(32K tokens)为上限；
-        # 默认 batch_size=256 (≈40K 字符) 远低于上限，通常无需收缩。
+        # 默认 batch_size=128；较大的输入仍会按字符预算预先收缩。
         # 仅当 行均长 x batch_size 估算超限时，收缩到 ≤ 上限的最大档位。
         _HARD_LIMIT_CHARS = 90000  # 略低于实测 100K，留安全余量
-        _BATCH_LEVELS = (256, 128, 64, 32, 16, 8, 4, 2, 1)  # 收缩档位表
-        _bs = batch_size
+        _BATCH_LEVELS = (128, 64, 32, 16, 8, 4, 2, 1)  # 收缩档位表
+        _bs = max(1, min(int(batch_size), _BATCH_LEVELS[0]))
         if _bs > 1:
             _window = texts[: min(_bs * 2, 64)]  # 抽样估算行均长（封顶 64 行）
             _avg = sum(len(x) for x in _window) / max(len(_window), 1)
@@ -189,7 +138,9 @@ class OllamaEncoder:
                     )
 
         all_embs = []
-        for i in range(0, len(texts), _bs):
+        i = 0
+        single_tokenize_retries = 0
+        while i < len(texts):
             # ── 检查停止信号（GUI 窗口关闭时中断编码）──
             if stop_event is not None and stop_event.is_set():
                 break
@@ -220,12 +171,36 @@ class OllamaEncoder:
             except _requests.exceptions.HTTPError as e:
                 resp_obj = getattr(e, "response", None)
                 status = resp_obj.status_code if resp_obj is not None else 0
+                body = (getattr(resp_obj, "text", "") or "").strip()
+                if status == 400 and "tokenize" in body.lower():
+                    if len(batch) > 1:
+                        previous_size = len(batch)
+                        _bs = max(1, previous_size // 2)
+                        logger.warning(
+                            "Ollama tokenizer 拒绝 %d 条批次，自动收缩为 %d 条",
+                            previous_size,
+                            _bs,
+                        )
+                        single_tokenize_retries = 0
+                        continue
+                    if single_tokenize_retries < len(self._TOKENIZE_RETRY_DELAYS):
+                        import time as _time
+
+                        delay = self._TOKENIZE_RETRY_DELAYS[single_tokenize_retries]
+                        single_tokenize_retries += 1
+                        logger.warning(
+                            "Ollama tokenizer 暂不可用，%.1fs 后重试单条请求",
+                            delay,
+                        )
+                        _time.sleep(delay)
+                        continue
                 if status == 404:
                     raise RuntimeError(
                         f"❌ Ollama 模型未找到: {self._model}\n"
                         f"   请运行: ollama pull {self._model}"
                     )
-                raise RuntimeError(f"❌ Ollama API 错误 ({status}): {e}")
+                detail = f"\n   Ollama 响应: {body[:500]}" if body else ""
+                raise RuntimeError(f"❌ Ollama API 错误 ({status}): {e}{detail}")
             except (
                 _requests.exceptions.MissingSchema,
                 _requests.exceptions.InvalidSchema,
@@ -249,6 +224,8 @@ class OllamaEncoder:
             except Exception as e:
                 raise RuntimeError(f"❌ Ollama 响应解析失败: {e}")
             all_embs.extend(embs)
+            i += len(batch)
+            single_tokenize_retries = 0
 
         # ── 如果被中断，返回已编码的部分或空数组 ──
         if not all_embs:

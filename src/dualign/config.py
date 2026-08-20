@@ -62,14 +62,11 @@ def get_cache_root() -> str:
     return _default_cache_root()
 
 
-def get_embedding_cache_dir(entry_id: str = "") -> str:
-    """返回该章节的嵌入缓存目录（统一缓存根下按 entry_id 分目录）。"""
-    root = get_cache_root()
-    cache_dir = os.path.join(root, "emb")
-    if entry_id:
-        cache_dir = os.path.join(cache_dir, entry_id)
+def get_embedding_cache_path() -> str:
+    """返回全局行级嵌入缓存数据库路径。"""
+    cache_dir = os.path.join(get_cache_root(), "emb")
     os.makedirs(cache_dir, exist_ok=True)
-    return cache_dir
+    return os.path.join(cache_dir, "vecs.db")
 
 
 def _ui_session_cache_path(entry_id: str = "") -> str:

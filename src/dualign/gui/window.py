@@ -243,9 +243,12 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._build_ui()
         self._setup_menu()
 
-        # 若提供了 file_entries，在 UI 构建完成后再加载
+        # 若提供了 file_entries，先让窗口完成首帧绘制，再开始加载首章。
+        # 集成方因此不会在 DualignWindow 构造期间同步承担章节 I/O。
         if file_entries is not None:
-            self.load_from_provider(file_entries)
+            QTimer.singleShot(
+                50, lambda e=list(file_entries): self.load_from_provider(e)
+            )
 
     # ═══════════════════════════════════════════════════════════
     # ═══════════════════════════════════════════════════════════
@@ -1713,64 +1716,6 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         hm.addAction("关于 Dualign", self._on_about)
 
     # ── 文件菜单回调 ──
-
-    def _on_promote(self):
-        """固化修复当前章节（菜单项回调）。"""
-        from pathlib import Path
-
-        if not self._repaired_dir or not self._current_entry_id:
-            # 无当前章节信息 → 提示用户
-            QMessageBox.information(
-                self,
-                "固化修复",
-                "请先在 Reader GUI 中操作：\n\n"
-                "1. 在文件名树中勾选要固化的章节\n"
-                "2. 点击操作面板中的「⬆ 固化修复」按钮\n\n"
-                "固化会用 repaired/ 中的修复结果覆盖 raw/ 文件，"
-                "并备份原文件为 .bak。",
-            )
-            return
-
-        from dualign.common import promote_repaired
-
-        entry_id = self._current_entry_id
-        repaired_dir = self._repaired_dir
-
-        # 从 repaired_dir 推导 src/tgt 路径
-        src_path = str(Path(repaired_dir) / f"{entry_id}.source.md")
-        tgt_path = str(Path(repaired_dir) / f"{entry_id}.target.md")
-
-        reply = QMessageBox.question(
-            self,
-            "确认固化",
-            f"将用修复后的文件置换原始文件：\n"
-            f"  章节: {entry_id}\n"
-            f"  策略: {self._strategy}\n"
-            f"  原始文件将备份为 .bak\n\n"
-            f"⚠ 破坏性操作 — 固化后需重新对齐/校订。\n\n"
-            f"确认执行？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        result = promote_repaired(
-            entry_id=entry_id,
-            src_path=src_path,
-            tgt_path=tgt_path,
-            repaired_dir=repaired_dir,
-            strategy=self._strategy,
-        )
-
-        if result["success"]:
-            QMessageBox.information(
-                self,
-                "固化完成",
-                "✓ 文件已替换\n" "✓ 原始文件已备份\n" "✓ 缓存已清除",
-            )
-        else:
-            QMessageBox.warning(self, "固化失败", result["message"])
 
     # ── 欢迎页帮助链接回调 ──
 

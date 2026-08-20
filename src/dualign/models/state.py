@@ -294,9 +294,18 @@ class ChapterState:
 
     def group(self, snap_i: int) -> Optional[SnapGroup]:
         """按外部索引查找 SnapGroup。"""
-        for g in self.groups:
-            if g.snap_i == snap_i:
-                return g
+        # groups 始终按 snap_i 排序。逐项扫描会在评分轮询逐行查询时
+        # 将大章节退化为 O(n²)，两千行即可让 GUI 停顿十余秒。
+        lo, hi = 0, len(self.groups)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            group = self.groups[mid]
+            if group.snap_i < snap_i:
+                lo = mid + 1
+            elif group.snap_i > snap_i:
+                hi = mid
+            else:
+                return group
         return None
 
     # ── 结构操作（返回新 ChapterState） ──

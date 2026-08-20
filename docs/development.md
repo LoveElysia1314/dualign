@@ -29,6 +29,14 @@ ollama serve
 ollama pull leoipulsar/harrier-0.6b
 ```
 
+如果升级前已生成 `emb/{entry_id}/vecs.db`，执行：
+
+```bash
+uv run python scripts/migrate_embedding_cache.py --remove-legacy
+```
+
+脚本会先合并并逐库校验所有哈希，只在校验通过后删除旧缓存。
+
 ### 依赖分组
 
 | 分组 | 命令                      | 包含                                  |

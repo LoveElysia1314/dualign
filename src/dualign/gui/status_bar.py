@@ -401,3 +401,12 @@ class StatusBar(QFrame):
         else:
             self._edit_btn.setChecked(True)
         self._mode_group.blockSignals(False)
+
+    def set_view_mode_enabled(self, enabled: bool):
+        """启用/锁定模式切换；准备对齐数据时禁止进入可编辑校订态。"""
+        self._edit_btn.setEnabled(enabled)
+        self._preview_btn.setEnabled(enabled)
+        if enabled:
+            self._mode_wrapper.setToolTip("")
+        else:
+            self._mode_wrapper.setToolTip("文本准备完成后将自动进入校订模式")

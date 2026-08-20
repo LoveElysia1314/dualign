@@ -149,6 +149,42 @@ class TestOllamaRequestErrors:
             enc.encode(["hello"])
         assert "pull" in str(exc.value) or "未找到" in str(exc.value)
 
+    def test_tokenizer_failure_shrinks_batch_and_preserves_order(self):
+        enc = OllamaEncoder(
+            "test-model", base_url="http://localhost:11434", instruction=""
+        )
+        batch_sizes = []
+
+        def post(*args, **kwargs):
+            batch = kwargs["json"]["input"]
+            batch_sizes.append(len(batch))
+            if len(batch) > 2:
+                return MockResponse(
+                    status_code=400,
+                    json_data={"error": "tokenize connection refused"},
+                )
+            embeddings = [[float(text[-1]), 1.0] for text in batch]
+            return MockResponse(json_data={"embeddings": embeddings})
+
+        enc._session = _make_mock_session(post)
+        result = enc.encode(["text1", "text2", "text3", "text4"], batch_size=4)
+
+        assert batch_sizes == [4, 2, 2]
+        assert result.shape == (4, 2)
+        assert result[0, 0] < result[-1, 0]
+
+    def test_http_error_includes_ollama_response_body(self):
+        enc = OllamaEncoder("test-model", base_url="http://localhost:11434")
+        enc._session = _make_mock_session(
+            lambda *args, **kwargs: MockResponse(
+                status_code=400,
+                json_data={"error": "invalid input payload"},
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="invalid input payload"):
+            enc.encode(["hello"])
+
 
 class TestOpenAIRequestErrors:
     """用 mock requests.post 测试各类异常的正确包装。"""

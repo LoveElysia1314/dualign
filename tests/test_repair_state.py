@@ -29,6 +29,13 @@ class TestRepairStateCreate:
         assert cs.group(0) is not None
         assert cs.group(99) is None
 
+    def test_current_reuses_immutable_replay_result(self, simple_state):
+        assert simple_state.current is simple_state.current
+
+        changed = simple_state.apply(RepairAction(kind="ok", op_index=0))
+        assert changed.current is changed.current
+        assert changed.current is not simple_state.current
+
     def test_not_dirty_initially(self, simple_state):
         assert len(simple_state.repair_log) == 0
 
