@@ -7,7 +7,6 @@ Dualign — GUI 后台工作线程
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
@@ -70,7 +69,7 @@ class EncodeThread(QThread):
         src_lines=None,
         tgt_lines=None,
         entry_id="",
-        report_path="",
+        alignment_path="",
     ):
         super().__init__(parent)
         self.src_path = src_path
@@ -78,7 +77,8 @@ class EncodeThread(QThread):
         self._src_lines = src_lines
         self._tgt_lines = tgt_lines
         self.entry_id = entry_id
-        self.report_path = report_path
+        self.alignment_path = alignment_path
+        self.formal_alignment_error = ""
         self.time_s = 0.0
         self._stop_event = threading.Event()
 
@@ -104,11 +104,10 @@ class EncodeThread(QThread):
         src_hash = _content_hash(src_lines)
         tgt_hash = _content_hash(tgt_lines)
 
-        # 已完成章节的 report.json 足以恢复校订视图。缓存探测必须早于
-        # 模型加载和嵌入编码，否则“打开已对齐章节”仍会无谓等待模型。
+        # A current report is the sole persisted alignment/session source.
         cached = self._load_cached_alignment(src_hash, tgt_hash)
         if cached is not None:
-            self.status_signal.emit("✓ 对齐缓存命中，正在恢复校订会话…")
+            self.status_signal.emit("✓ 已加载对齐工作文件…")
             self.cache_hit_signal.emit(
                 (cached, src_lines, tgt_lines, src_hash, tgt_hash)
             )
@@ -117,6 +116,10 @@ class EncodeThread(QThread):
         # 只有缓存 miss 才先渲染逐行预览；命中时直接渲染最终对齐表，
         # 避免同一大章节连续构造两张表。
         self.text_ready_signal.emit(src_hash, tgt_hash, src_lines, tgt_lines)
+        if self.formal_alignment_error:
+            self.status_signal.emit(
+                f"正式对齐关系不可用：{self.formal_alignment_error}；将重新对齐…"
+            )
         self.status_signal.emit("未找到可用的对齐缓存，正在准备编码…")
         if self._stop_event.is_set():
             return
@@ -165,29 +168,29 @@ class EncodeThread(QThread):
         )
 
     def _load_cached_alignment(self, src_hash: str, tgt_hash: str):
-        """在工作线程中验证并恢复 report.json 中的对齐结果。"""
-        if not self.report_path or not os.path.isfile(self.report_path):
-            return None
-        try:
-            with open(self.report_path, encoding="utf-8") as report_file:
-                report = json.load(report_file)
-            if report.get("src_hash") != src_hash or report.get("tgt_hash") != tgt_hash:
-                return None
-            ops = report.get("ops") or []
-            stats = report.get("stats") or {}
-            if not ops:
-                return None
-            return AlignmentResult(
-                all_ops=[
-                    (tuple(op["s"]), tuple(op["t"]), float(op["sc"])) for op in ops
-                ],
-                anchors=[],
-                anchor_op_indices={},
-                stats=stats,
+        """Restore a report only while both source hashes still match."""
+        if self.alignment_path and os.path.isfile(self.alignment_path):
+            from dualign.services.report_io import (
+                load_report,
+                operations_from_report,
+                report_matches_documents,
             )
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            # 损坏/旧格式报告只视为 miss，随后走正常编码与对齐流程。
-            return None
+
+            try:
+                report = load_report(self.alignment_path)
+                if not report_matches_documents(report, self.src_path, self.tgt_path):
+                    raise ValueError("源文档已变化")
+                result = AlignmentResult(
+                    all_ops=operations_from_report(report),
+                    anchors=[],
+                    anchor_op_indices={},
+                    stats=dict(report.get("stats") or {}),
+                )
+                result.stats["load_origin"] = "report"
+                return result
+            except (OSError, ValueError) as exc:
+                self.formal_alignment_error = str(exc)
+        return None
 
 
 # ── 对齐线程 ────────────────────────────────────────────────

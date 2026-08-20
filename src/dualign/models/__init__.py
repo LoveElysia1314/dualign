@@ -9,6 +9,17 @@ from dualign.models.state import (
     SnapGroup,
 )
 from dualign.models.action import RepairAction, AiProposal, AiProposalStore
+from dualign.models.alignment_pair import (
+    AlignmentLink,
+    AlignmentPair,
+    AlignmentPairValidationError,
+    DocumentReference,
+)
+from dualign.models.pair_editing import (
+    BlockLink,
+    EditableDocument,
+    PairEditingState,
+)
 from dualign.models.snap_state import (
     SnapState,
     SnapInfo,
@@ -33,6 +44,13 @@ __all__ = [
     "RepairAction",
     "AiProposal",
     "AiProposalStore",
+    "AlignmentLink",
+    "AlignmentPair",
+    "AlignmentPairValidationError",
+    "DocumentReference",
+    "BlockLink",
+    "EditableDocument",
+    "PairEditingState",
     "AlignedRow",
     "SnapGroup",
     "ChapterState",

@@ -1,23 +1,39 @@
 import json
 
 from dualign.__main__ import _load_gui_entries
-from dualign.common import content_hash
+from dualign.common import FilePair
 from dualign.gui.workers import EncodeThread
+from dualign.models.action import RepairAction
+from dualign.services.cli_pipeline import align_documents
+
+from test_cli_pipeline import MockEncoder
 
 
-def test_load_gui_entries_preserves_project_paths(tmp_path):
+def _report_pair(tmp_path):
+    source = tmp_path / "one.source.md"
+    target = tmp_path / "one.target.md"
+    report = tmp_path / "alignment" / "one.report.json"
+    source.write_text("甲\n乙\n", encoding="utf-8")
+    target.write_text("A\nB\n", encoding="utf-8")
+    assert align_documents(str(source), str(target), str(report), model=MockEncoder())[
+        "success"
+    ]
+    return source, target, report
+
+
+def test_load_gui_entries_uses_neutral_documents_and_one_report(tmp_path):
     manifest = tmp_path / "entries.json"
     manifest.write_text(
         json.dumps(
             [
                 {
-                    "entry_id": "001",
+                    "entry_id": "one",
                     "label": "第一章",
-                    "source_path": "raw/001.source.md",
-                    "target_path": "raw/001.target.md",
-                    "repaired_dir": "repaired",
-                    "report_path": "repaired/001.report.json",
-                    "metadata": {"novel_id": "demo"},
+                    "document_a_path": "a.md",
+                    "document_b_path": "b.md",
+                    "report_path": "alignment/one.report.json",
+                    "language_a": "zh-Hans",
+                    "language_b": "en",
                 }
             ],
             ensure_ascii=False,
@@ -25,94 +41,57 @@ def test_load_gui_entries_preserves_project_paths(tmp_path):
         encoding="utf-8",
     )
 
-    entries = _load_gui_entries(str(manifest))
+    entry = _load_gui_entries(str(manifest))[0]
 
-    assert len(entries) == 1
-    assert entries[0].entry_id == "001"
-    assert entries[0].repaired_dir == "repaired"
-    assert entries[0].report_path == "repaired/001.report.json"
-    assert entries[0].metadata == {"novel_id": "demo"}
-
-
-def test_encode_thread_restores_valid_alignment_before_encoding(tmp_path):
-    src_lines = ["原文一", "原文二"]
-    tgt_lines = ["译文一", "译文二"]
-    report = tmp_path / "001.report.json"
-    report.write_text(
-        json.dumps(
-            {
-                "src_hash": content_hash(src_lines),
-                "tgt_hash": content_hash(tgt_lines),
-                "ops": [
-                    {"s": [0], "t": [0], "sc": 0.9},
-                    {"s": [1], "t": [1], "sc": 0.8},
-                ],
-                "stats": {"n_source": 2, "n_target": 2},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    worker = EncodeThread("src.md", "tgt.md", report_path=str(report))
-
-    result = worker._load_cached_alignment(
-        content_hash(src_lines), content_hash(tgt_lines)
-    )
-
-    assert result is not None
-    assert len(result.all_ops) == 2
-    assert result.stats["n_source"] == 2
+    assert entry.document_a_path == "a.md"
+    assert entry.document_b_path == "b.md"
+    assert entry.report_path == "alignment/one.report.json"
+    assert entry.alignment_path == entry.report_path
 
 
-def test_encode_thread_cache_hit_skips_preview_and_model(tmp_path, monkeypatch):
-    src_lines = ["原文一", "原文二"]
-    tgt_lines = ["译文一", "译文二"]
-    src = tmp_path / "001.source.md"
-    tgt = tmp_path / "001.target.md"
-    src.write_text("\n".join(src_lines), encoding="utf-8")
-    tgt.write_text("\n".join(tgt_lines), encoding="utf-8")
-    report = tmp_path / "001.report.json"
-    report.write_text(
-        json.dumps(
-            {
-                "src_hash": content_hash(src_lines),
-                "tgt_hash": content_hash(tgt_lines),
-                "ops": [{"s": [0], "t": [0], "sc": 0.9}],
-                "stats": {"n_source": 2, "n_target": 2},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    worker = EncodeThread(str(src), str(tgt), report_path=str(report))
-    cache_hits = []
-    previews = []
-    worker.cache_hit_signal.connect(cache_hits.append)
-    worker.text_ready_signal.connect(lambda *args: previews.append(args))
+def test_file_pair_exposes_read_only_source_target_aliases():
+    entry = FilePair("one", "One", "a.md", "b.md", "one.report.json")
+    assert entry.source_path == "a.md"
+    assert entry.target_path == "b.md"
+
+
+def test_encode_thread_restores_report_before_loading_model(tmp_path, monkeypatch):
+    source, target, report = _report_pair(tmp_path)
+    worker = EncodeThread(str(source), str(target), alignment_path=str(report))
+    hits = []
+    worker.cache_hit_signal.connect(hits.append)
     monkeypatch.setattr(
         "dualign.gui.workers._try_lazy_load_model",
-        lambda: (_ for _ in ()).throw(AssertionError("缓存命中时不应加载模型")),
+        lambda: (_ for _ in ()).throw(AssertionError("report hit must skip model")),
     )
 
     worker._run_impl()
 
-    assert len(cache_hits) == 1
-    assert previews == []
+    assert len(hits) == 1
+    assert hits[0][0].stats["load_origin"] == "report"
 
 
-def test_encode_thread_rejects_stale_alignment_report(tmp_path):
-    report = tmp_path / "001.report.json"
-    report.write_text(
-        json.dumps(
-            {
-                "src_hash": "old-source",
-                "tgt_hash": "old-target",
-                "ops": [{"s": [0], "t": [0], "sc": 0.9}],
-                "stats": {},
-            }
-        ),
-        encoding="utf-8",
+def test_encode_thread_rejects_report_after_source_change(tmp_path):
+    source, target, report = _report_pair(tmp_path)
+    source.write_text("changed\n", encoding="utf-8")
+    worker = EncodeThread(str(source), str(target), alignment_path=str(report))
+
+    assert worker._load_cached_alignment("ignored", "ignored") is None
+    assert "变化" in worker.formal_alignment_error
+
+
+def test_report_can_store_snap_anchored_action_without_materialized_files(tmp_path):
+    source, target, report = _report_pair(tmp_path)
+    data = json.loads(report.read_text(encoding="utf-8"))
+    action = RepairAction.make_ok(0)
+    action.source = "user"
+    data["repair_log"] = [action.to_dict()]
+    from dualign.services.report_io import save_report
+
+    save_report(data, report)
+
+    assert report.is_file()
+    assert not (report.parent / "one.source.md").exists()
+    assert (
+        json.loads(report.read_text(encoding="utf-8"))["repair_log"][0]["op_index"] == 0
     )
-    worker = EncodeThread("src.md", "tgt.md", report_path=str(report))
-
-    assert worker._load_cached_alignment("new-source", "new-target") is None

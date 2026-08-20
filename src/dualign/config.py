@@ -77,7 +77,7 @@ def _ui_session_cache_path(entry_id: str = "") -> str:
 
 
 def get_report_cache_dir() -> str:
-    """返回报告缓存根目录。"""
+    """Return the cache used by standalone GUI reports."""
     _override = os.environ.get("DUALIGN_REPORT_DIR", "")
     if _override:
         return _override
@@ -94,9 +94,8 @@ def get_report_cache_dir() -> str:
     return os.path.join(get_cache_root(), "reports")
 
 
-def repair_session_path(entry_id: str, repaired_dir: str = "") -> str:
-    """返回修复报告/会话统一文件路径。"""
-    if not repaired_dir:
-        repaired_dir = get_report_cache_dir()
-    os.makedirs(repaired_dir, exist_ok=True)
-    return os.path.join(repaired_dir, f"{entry_id}.report.json")
+def repair_session_path(entry_id: str, report_dir: str = "") -> str:
+    """Return the work report path for one GUI entry."""
+    root = report_dir or get_report_cache_dir()
+    os.makedirs(root, exist_ok=True)
+    return os.path.join(root, f"{entry_id}.report.json")

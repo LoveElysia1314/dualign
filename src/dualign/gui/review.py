@@ -186,7 +186,7 @@ class ReviewController(QWidget):
     doc_realign_requested = Signal()
     doc_ai_chapter_requested = Signal()
     doc_remove_requested = Signal()
-    doc_promote_requested = Signal()
+    doc_overwrite_requested = Signal()
     strategy_changed = Signal(int)
 
     def __init__(self, parent=None):
@@ -326,14 +326,14 @@ class ReviewController(QWidget):
             self._summary_chapter.setVisible(bool(chapter))
 
     def set_summary_paths(self, src_path: str, tgt_path: str):
-        """设置摘要原文/译文路径（完整文件名 + 超链接）。"""
+        """设置文档 A/B 路径摘要（完整文件名 + 超链接）。"""
         import os.path as _osp
 
         src_name = _osp.basename(src_path) if src_path else "—"
         tgt_name = _osp.basename(tgt_path) if tgt_path else "—"
         if hasattr(self, "_summary_src"):
             self._summary_src.setText(
-                '<span style="color:palette(text);">原文：</span>'
+                '<span style="color:palette(text);">文档 A：</span>'
                 f'<a href="file:///{src_path}" style="color:palette(link);'
                 f'text-decoration:none;">{src_name}</a>'
             )
@@ -341,7 +341,7 @@ class ReviewController(QWidget):
             self._summary_src._path = src_path
         if hasattr(self, "_summary_tgt"):
             self._summary_tgt.setText(
-                '<span style="color:palette(text);">译文：</span>'
+                '<span style="color:palette(text);">文档 B：</span>'
                 f'<a href="file:///{tgt_path}" style="color:palette(link);'
                 f'text-decoration:none;">{tgt_name}</a>'
             )
@@ -392,9 +392,9 @@ class ReviewController(QWidget):
     def _build_summary(self, layout: QVBoxLayout):
         """文档摘要（4 行 × 3 列等距网格）。
 
-        row0: 原文：fullname（超链接，跨 3 列）
-        row1: 译文：fullname（超链接，跨 3 列）
-        row2: 原文行数 | 译文行数 | Snap均分
+        row0: 文档 A：fullname（超链接，跨 3 列）
+        row1: 文档 B：fullname（超链接，跨 3 列）
+        row2: 文档 A 块数 | 文档 B 块数 | 关系均分
         row3: 真锚点率 | 间隙行率 | 合并触顶
         末尾：章节进度
         """
@@ -476,32 +476,38 @@ class ReviewController(QWidget):
         for ci, (key, lb, sig) in enumerate(
             [
                 ("realign", "重新对齐", self.doc_realign_requested),
-                ("auto_repair", "自动修复", self.doc_auto_repair_requested),
-                ("reset_repair", "重置修复", self.doc_reset_repair_requested),
-                ("promote", "固化修复", self.doc_promote_requested),
+                ("auto_repair", "自动校订", self.doc_auto_repair_requested),
+                ("reset_repair", "重置校订", self.doc_reset_repair_requested),
+                ("overwrite", "覆写源文档…", self.doc_overwrite_requested),
             ]
         ):
             b = QPushButton(lb)
             b.clicked.connect(self._mk_emit(sig))
             dg.addWidget(b, 0, ci)
             self._doc_btns[key] = b
-        # row 1: 策略combo + 撤销/恢复
-        dg.addWidget(QLabel("自动修复策略:"), 1, 0)
+        # 策略说明和较长选项横跨其余三列，避免窄 Dock 中被截断。
+        dg.addWidget(QLabel("对齐策略："), 1, 0)
         self._strategy_combo = QComboBox()
-        self._strategy_combo.addItems(["最小信息量", "原文为准", "译文为准"])
+        self._strategy_combo.addItems(
+            ["最少修改", "以文档 A 为结构基准", "以文档 B 为结构基准"]
+        )
         self._strategy_combo.setCurrentIndex(1)
         self._strategy_combo.currentIndexChanged.connect(self.strategy_changed.emit)
-        dg.addWidget(self._strategy_combo, 1, 1)
+        self._strategy_combo.setMinimumContentsLength(12)
+        self._strategy_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        dg.addWidget(self._strategy_combo, 1, 1, 1, 3)
         for ci, (key, lb, handler) in enumerate(
             [
                 ("undo", "撤销", self._on_undo),
                 ("redo", "恢复", self._on_redo),
             ],
-            start=2,
+            start=0,
         ):
             b = QPushButton(lb)
             b.clicked.connect(handler)
-            dg.addWidget(b, 1, ci)
+            dg.addWidget(b, 2, ci * 2, 1, 2)
             self._doc_btns[key] = b
             self._btn_refs[key] = b
         for _ci in range(4):
@@ -675,7 +681,7 @@ class ReviewController(QWidget):
             "auto_repair": can_edit,
             "reset_repair": can_edit,
             "realign": can_align and data_loaded,
-            "promote": can_edit,
+            "overwrite": can_edit,
             "undo": can_edit,
             "redo": can_edit,
         }

@@ -8,6 +8,11 @@
 
 ### 🔧 变更
 
+- 将 `report.json` 确立为唯一对齐与校订工作状态，记录中性文档 A/B、块级关系、正文哈希与非敏感生成来源。
+- GUI 普通保存只更新报告；“覆写源文档”在差异审查后以可恢复的三文件事务写入两份正文和报告。
+- CLI `align` 与 Python `align_documents()` 只生成报告，不再隐式导出等行 Markdown。
+- 正文校订不再要求两侧行数相等，GUI 与公共参数逐步统一为文档 A/B 术语。
+- 删除旧报告迁移、`repaired/`、`.bak`、晋升和 YAML 双状态支持。
 - 将按章节分散的 `vecs.db` 合并为全局行级嵌入缓存，真正支持跨文档复用。
 - 缓存写入改为不可变键语义，增加 SQLite 忙等待和大批量查询分片。
 - 新增 `scripts/migrate_embedding_cache.py`，支持幂等迁移、逐库校验及安全移除旧分库。
@@ -56,7 +61,7 @@
     - 真锚点搜索改为递归迭代（分段后对手减少 → 被遮挡锚点浮现）
     - 移除 restricted/full DP 双轨，合并为单一 DP
     - 移除 pure/mixed/adjacent 间隙类型划分
-- **AI Agent 重构为 v2**：移除 auto*note/would*\* 暴露给 AI，改为两层文本模型
+- **AI Agent 重构**：移除 auto*note/would*\* 暴露给 AI，改为两层文本模型
 - **嵌入缓存从 NPZ 迁移到 SQLite**：支持行级缓存，跨文档共享
 - **Ollama AI 审校后端移除**：仅嵌入服务使用 Ollama，AI 审校统一使用 DeepSeek API
 - **CollapsibleSection 回退为 QGroupBox**：消除 Windows DWM 启动闪烁

@@ -66,8 +66,8 @@ demo/cache/*
 scripts/compute_anchor_ratio.py
 scripts/anchor_report.py
 scripts/anchor_ratio_report.py
-demo/output/emb/*
-demo/output/*.npz
+demo/output/
+demo/raw/*.report.json
 
 # ═══════════════════════════════════════════════════════════════
 # 演示 — 临时测试文件

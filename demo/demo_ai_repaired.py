@@ -23,10 +23,7 @@ _DEMO = Path(__file__).resolve().parent
 if str(_DEMO) not in sys.path:
     sys.path.insert(0, str(_DEMO))
 
-from demo import SRC_PATH, TGT_PATH, CACHE_DIR, OUTPUT_DIR
-
-# AI 审校状态写入路径
-_REPORT_PATH = CACHE_DIR / "reports" / "sample.report.json"
+from dualign.demo import get_demo_paths
 
 # ═══════════════════════════════════════════════════════════════
 # 1. 标准答案（评分用）
@@ -65,68 +62,40 @@ def score_actions(actions: list, expected: list) -> tuple:
 # ═══════════════════════════════════════════════════════════════
 
 
-def run_alignment(strategy: str = "src"):
+def run_alignment(
+    document_a: str,
+    document_b: str,
+    report_path: Path,
+    strategy: str = "src",
+):
     """嵌入编码 → 对齐 → 自动修复 → 审校上下文。"""
-    from collections import Counter
-    from dualign.core import align, AlignConfig, op_type_str
-    from dualign.models.state import AlignmentSnapshot
-    from dualign.services.repair import RepairState, RepairService
     from dualign.services.ai_repair_agent import build_chapter_context
+    from dualign.services.cli_pipeline import align_documents
     from dualign.services.embedding import _try_lazy_load_model
-    from dualign.services.embedding_cache import EmbeddingCache
-    from dualign.services.cached_encoder import CachedEncoder
-    from dualign.common import load_text_lines
+    from dualign.services.report_io import load_report, repair_state_from_report
 
     t0 = time.time()
-    src_lines = load_text_lines(str(SRC_PATH))
-    tgt_lines = load_text_lines(str(TGT_PATH))
-    # 估算段落数：空行分隔
-    src_breaks = []
-    try:
-        with open(str(SRC_PATH), "r", encoding="utf-8") as _f:
-            src_breaks = [i for i, ln in enumerate(_f, 1) if not ln.strip()]
-    except Exception:
-        pass
-    print(
-        f"  原文: {len(src_lines)} 行 ({len(src_breaks)} 段落), 译文: {len(tgt_lines)} 行"
-    )
 
     model = _try_lazy_load_model()
     if model is None:
         print("  X 嵌入模型未加载")
         return None, None, None
-
-    os.makedirs(CACHE_DIR, exist_ok=True)
-
-    # ── 使用 EmbeddingCache（SQLite 行级）替代旧 .npz ──
-    # ── CachedEncoder: 统一缓存代理 ──
-    db_path = os.path.join(str(CACHE_DIR), "vecs.db")
-    ec = EmbeddingCache(db_path)
-    cenc = CachedEncoder(model, ec)
-    src_emb = cenc.encode(src_lines)
-    tgt_emb = cenc.encode(tgt_lines)
-    print(f"  V 编码完成（缓存命中率 {cenc.cache_hit_rate:.0%}）")
-
-    cfg = AlignConfig()
-    result = align(
-        src_lines,
-        tgt_lines,
-        src_emb,
-        tgt_emb,
-        config=cfg,
-        encode_fn=cenc.encode,
+    result = align_documents(
+        document_a,
+        document_b,
+        str(report_path),
+        model=model,
+        strategy=strategy,
     )
-
-    snapshot = AlignmentSnapshot.from_alignment(result.all_ops, src_lines, tgt_lines)
-    tc = Counter(op_type_str(s, t) for s, t, _ in result.all_ops)
-    print(f"  对齐: {len(result.all_ops)} 对, {dict(tc)}")
+    if not result.get("success"):
+        print(f"  X 对齐失败: {result.get('error', '未知错误')}")
+        return None, None, None
+    report = load_report(report_path)
+    repaired_state = repair_state_from_report(report, document_a, document_b)
+    stats = report.get("stats") or {}
+    print(f"  对齐: {len(report['ops'])} 对")
     print(
-        f"  真锚点: {result.stats['n_true_anchors']}, 均分: {result.stats['avg_similarity']:.4f}"
-    )
-
-    raw_state = RepairState(snapshot)
-    repaired_state = RepairService.auto_repair(
-        raw_state, strategy=strategy, model=model
+        f"  真锚点: {stats.get('n_true_anchors', 0)}, 均分: {stats.get('avg_similarity', 0):.4f}"
     )
     print(f"  自动修复: {len(repaired_state.repair_log)} 个操作")
 
@@ -136,6 +105,7 @@ def run_alignment(strategy: str = "src"):
         model=model,
         chapter_id="ch01",
         chapter_title="与天使相遇",
+        skip_auto_repair=True,
     )
     print(f"\n  待审: {len(ctx.reviewable_infos)} Snap\n")
     for info in ctx.reviewable_infos:
@@ -208,7 +178,9 @@ def _print_tool(evt):
 # ═══════════════════════════════════════════════════════════════
 
 
-def save_reports(ctx, actions, turn_log, tok, elapsed):
+def save_reports(
+    ctx, actions, turn_log, tok, elapsed, report_path: Path, output_dir: Path
+):
     from dualign.services.ai_repair_agent import (
         compute_cost,
         format_action,
@@ -223,8 +195,8 @@ def save_reports(ctx, actions, turn_log, tok, elapsed):
     turns = len(turn_log)
 
     # ── 写入 AI 审校状态到 report.json ──
-    if _REPORT_PATH.is_file():
-        set_ai_review(str(_REPORT_PATH), "completed", "")
+    if report_path.is_file():
+        set_ai_review(str(report_path), "completed", "")
 
     print("\n  ── 最终操作列表 ──")
     for a in actions:
@@ -239,9 +211,9 @@ def save_reports(ctx, actions, turn_log, tok, elapsed):
     print(f"  Token: 输入 {tok['in']} (缓存 {tok['cache']}) -> 输出 {tok['out']}")
     print(f"  费用: ${cost:.6f}")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    _debug_path = str(OUTPUT_DIR / "sample.review.debug.md")
-    _raw_path = str(OUTPUT_DIR / "sample.review.raw.md")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _debug_path = str(output_dir / "sample.review.debug.md")
+    _raw_path = str(output_dir / "sample.review.raw.md")
     dump_agent_debug(
         ctx,
         actions,
@@ -267,14 +239,15 @@ def save_reports(ctx, actions, turn_log, tok, elapsed):
     print(f"  Raw:   {_raw_path}")
 
 
-def render_output(state, actions):
+def render_output(state, actions, output_dir: Path):
     from dualign.services.repair import RepairService
 
     final_state = state
     for a in actions:
         final_state = final_state.apply(a)
-    sp = str(OUTPUT_DIR / "sample.source.ai_repaired.md")
-    tp = str(OUTPUT_DIR / "sample.target.ai_repaired.md")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sp = str(output_dir / "sample.document-a.preview.md")
+    tp = str(output_dir / "sample.document-b.preview.md")
     RepairService.render_to_files(final_state, sp, tp)
     print(f"  V src: {sp}")
     print(f"  V tgt: {tp}")
@@ -295,10 +268,22 @@ def main() -> int:
             print("=" * 50)
             return 1
 
+        document_a, document_b, label = get_demo_paths()
+        workspace = Path(document_a).parent
+        report_path = workspace / "sample.report.json"
+        output_dir = workspace / "review"
+
         print("=" * 60)
         print("第 1 步: 对齐流水线")
         print("=" * 60)
-        state, ctx, t0 = run_alignment(strategy="src")
+        print(f"  样例: {label}")
+        print(f"  临时工作区: {workspace}")
+        state, ctx, t0 = run_alignment(
+            document_a,
+            document_b,
+            report_path,
+            strategy="src",
+        )
         if state is None:
             return 1
 
@@ -307,8 +292,8 @@ def main() -> int:
             print("\n  待审列表为空，跳过 AI 审校")
             from dualign.common import set_ai_review
 
-            if _REPORT_PATH.is_file():
-                set_ai_review(str(_REPORT_PATH), "skipped", "无待审核异常")
+            if report_path.is_file():
+                set_ai_review(str(report_path), "skipped", "无待审核异常")
             return 0
 
         print("\n" + "=" * 60)
@@ -319,10 +304,10 @@ def main() -> int:
         print("\n" + "=" * 60)
         print("结果")
         print("=" * 60)
-        save_reports(ctx, actions, turn_log, tok, elapsed)
+        save_reports(ctx, actions, turn_log, tok, elapsed, report_path, output_dir)
 
         if actions:
-            render_output(state, actions)
+            render_output(state, actions, output_dir)
 
         print(f"\n  turns={len(turn_log)}  time={elapsed:.1f}s  tok_in={tok['in']}")
         return 0

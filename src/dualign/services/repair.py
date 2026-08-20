@@ -772,11 +772,15 @@ class RepairService:
 
             with EmbeddingCache(os.path.join(cache_dir, "vecs.db")) as cache:
                 encoder = CachedEncoder(model, cache)
-                src_emb = encoder.encode(src_lines)
-                tgt_emb = encoder.encode(tgt_lines)
+                combined = encoder.encode(src_lines + tgt_lines)
+                src_emb = combined[: len(src_lines)]
+                tgt_emb = combined[len(src_lines) :]
         else:
-            src_emb = np.array(model.encode(src_lines, normalize_embeddings=True))
-            tgt_emb = np.array(model.encode(tgt_lines, normalize_embeddings=True))
+            combined = np.array(
+                model.encode(src_lines + tgt_lines, normalize_embeddings=True)
+            )
+            src_emb = combined[: len(src_lines)]
+            tgt_emb = combined[len(src_lines) :]
         result = align(
             src_lines,
             tgt_lines,
@@ -972,11 +976,17 @@ class RepairService:
             from dualign.services.cached_encoder import CachedEncoder
 
             cenc = CachedEncoder(model, cache)
-            src_emb = cenc.encode(src_in)
-            tgt_emb = cenc.encode(tgt_in)
+            combined = cenc.encode(src_in + tgt_in)
+            src_emb = combined[: len(src_in)]
+            tgt_emb = combined[len(src_in) :]
+            encode_fn = cenc.encode
         else:
-            src_emb = np.array(model.encode(src_in, normalize_embeddings=True))
-            tgt_emb = np.array(model.encode(tgt_in, normalize_embeddings=True))
+            combined = np.array(
+                model.encode(src_in + tgt_in, normalize_embeddings=True)
+            )
+            src_emb = combined[: len(src_in)]
+            tgt_emb = combined[len(src_in) :]
+            encode_fn = model.encode
         split_cfg = AlignConfig(
             allow_deletions=False,
             allow_insertions=False,
@@ -988,7 +998,7 @@ class RepairService:
             src_emb,
             tgt_emb,
             config=split_cfg,
-            encode_fn=model.encode,
+            encode_fn=encode_fn,
             silent=True,
         )
         snap_split = AlignmentSnapshot.from_alignment(result.all_ops, src_in, tgt_in)

@@ -55,7 +55,7 @@ dualign/
 │   ├── __init__.py              # 公共 API
 │   ├── version.py               # 从包元数据读取版本
 │   ├── __main__.py              # CLI 入口 (gui/align/check/models)
-│   ├── common.py                # 工具函数 (hash/I/O/晋升)
+│   ├── common.py                # 通用工具与兼容入口
 │   ├── config.py                # 配置常量 + 缓存路径
 │   ├── providers.py             # ProviderManager (Ollama/LM Studio/自定义)
 │   │

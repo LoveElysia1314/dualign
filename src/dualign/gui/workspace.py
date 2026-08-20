@@ -93,7 +93,7 @@ class WorkspacePanel(QWidget):
         r.setContentsMargins(2, 2, 2, 2)
         r.setSpacing(4)
 
-        # ── 添加文件对（补上原文/译文标签）──
+        # ── 添加文件对 ──
         pg = QGroupBox("添加文件对")
         pl = QVBoxLayout(pg)
         pl.setContentsMargins(6, 8, 6, 4)
@@ -101,13 +101,13 @@ class WorkspacePanel(QWidget):
         self._se = DragDropLineEdit("拖拽或浏览 .md/.txt")
         self._te = DragDropLineEdit("拖拽或浏览 .md/.txt")
         for ic, label, ed, slt in [
-            ("📄", "原文:", self._se, self._on_browse_src),
-            ("📄", "译文:", self._te, self._on_browse_tgt),
+            ("📄", "文档 A:", self._se, self._on_browse_src),
+            ("📄", "文档 B:", self._te, self._on_browse_tgt),
         ]:
             rr = QHBoxLayout()
             rr.setSpacing(4)
             lbl = QLabel(label)
-            lbl.setFixedWidth(36)
+            lbl.setFixedWidth(58)
             lbl.setStyleSheet("")
             rr.addWidget(lbl)
             ed.setMinimumWidth(0)
@@ -182,14 +182,14 @@ class WorkspacePanel(QWidget):
 
     def _on_browse_src(self):
         p, _ = QFileDialog.getOpenFileName(
-            self, "选择原文", "", "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 A", "", "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if p:
             self._se.setText(p)
 
     def _on_browse_tgt(self):
         p, _ = QFileDialog.getOpenFileName(
-            self, "选择译文", "", "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 B", "", "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if p:
             self._te.setText(p)
@@ -200,10 +200,10 @@ class WorkspacePanel(QWidget):
         if not s or not t:
             return
         if not os.path.exists(s):
-            print(f"⚠ 原文不存在: {s}")
+            print(f"⚠ 文档 A 不存在: {s}")
             return
         if not os.path.exists(t):
-            print(f"⚠ 译文不存在: {t}")
+            print(f"⚠ 文档 B 不存在: {t}")
             return
         lb = Path(s).stem.split(".")[0]
         self._add_to_recent(lb, s, t)
@@ -242,9 +242,9 @@ class WorkspacePanel(QWidget):
             if it.src_path or it.tgt_path:
                 paths = []
                 if it.src_path:
-                    paths.append(f"源: {Path(it.src_path).name}")
+                    paths.append(f"A: {Path(it.src_path).name}")
                 if it.tgt_path:
-                    paths.append(f"译: {Path(it.tgt_path).name}")
+                    paths.append(f"B: {Path(it.tgt_path).name}")
                 lines.append("  " + "  ".join(paths))
             text = "\n".join(lines)
             if it.aligned:

@@ -1,72 +1,28 @@
-"""
-模式一：最简 for 循环
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""模式一：最简串行批处理。
 
-适用场景：少量文件对（< 10 对），串行执行，不需进度报告。
-教学目的：展示 Dualign 的最简集成方式——只需两样东西：
-          (1) 文件对列表, (2) for 循环。
-
-前置条件:
-  - Ollama 运行中，已拉取 leoipulsar/harrier-0.6b
-  - pip install -e . （已安装 dualign）
-
-┌─────────────────────────────────────────────────────────────┐
-│  这是教学示例，展示了集成 Dualign 所需的最小代码量。          │
-│  它不可直接运行——你需要替换 file_pairs 为自己的实际文件路径。 │
-└─────────────────────────────────────────────────────────────┘
-
-数据结构假设:
-    file_pairs = [
-        ("ch01.source.md", "ch01.target.md"),  # (原文, 译文)
-        ("ch02.source.md", "ch02.target.md"),
-        ("ch03.source.md", "ch03.target.md"),  # ...
-    ]
+把 file_pairs 替换为真实路径即可。输出是 *.report.json；
+两个输入文档不会被改写，也不会隐式生成等行 Markdown。
 """
 
-# ── 1. 唯一的导入 ──
-# align_chapter 是对齐→自动修复→导出的原子 API
-from dualign.services.cli_pipeline import align_chapter
+from pathlib import Path
 
-# ── 2. 准备文件对列表 ──
-# 这是消费端需要自行准备的核心数据：原文路径 ↔ 译文路径
-# 来源可以是：目录扫描结果、catalog 配置、数据库记录……
+from dualign.services.cli_pipeline import align_documents
+
 file_pairs = [
-    ("data/ch01.source.md", "data/ch01.target.md"),
-    ("data/ch02.source.md", "data/ch02.target.md"),
-    ("data/ch03.source.md", "data/ch03.target.md"),
+    ("data/ch01.zh.md", "data/ch01.en.md"),
+    ("data/ch02.zh.md", "data/ch02.en.md"),
+    ("data/ch03.zh.md", "data/ch03.en.md"),
 ]
+output_dir = Path("output/alignments")
+output_dir.mkdir(parents=True, exist_ok=True)
 
-# ── 3. 串行对齐 ──
-# align_chapter 的返回值：
-#   success: bool    — 是否成功
-#   quality: str     — "reliable" | "degraded" | "unreliable"
-#   report_path: str — report.json 的路径
-#   ops: list        — 对齐操作列表
-#   error: str       — 仅失败时有
-for src, tgt in file_pairs:
-    result = align_chapter(
-        src_path=src,
-        tgt_path=tgt,
-        output_dir="output/repaired/",  # 修复后 .md 的输出目录
-        strategy="src",  # src | tgt | minimal
+for document_a, document_b in file_pairs:
+    pair_name = f"{Path(document_a).stem}__{Path(document_b).stem}.report.json"
+    result = align_documents(
+        document_a_path=document_a,
+        document_b_path=document_b,
+        report_path=str(output_dir / pair_name),
     )
-
     status = "✓" if result["success"] else "✗"
-    print(f"{status} {src} → quality={result.get('quality', '?')}")
-
-# ── 输出产物 ──
-# output/repaired/
-#   ├── ch01.report.json     # 对齐报告（含异常列表）
-#   ├── ch01.source.md       # 修复后原文
-#   ├── ch01.target.md       # 修复后译文
-#   ├── ch02.report.json     # ...
-#   └── ...
-
-# ── 进阶提示 ──
-# 1. align_chapter 内部已包含内容级哈希缓存。
-#    文件未变化时重复调用自动跳过，不需要额外处理。
-# 2. 如果已有对齐产物不想重复运行，可在外部检查 report.json 存在性：
-#    import os
-#    if os.path.isfile(f"output/repaired/{entry_id}.report.json"):
-#        print(f"跳过 {entry_id} — 已对齐")
-#        continue
+    detail = result.get("report_path", result.get("error", ""))
+    print(f"{status} {Path(document_a).name} ↔ {Path(document_b).name}: {detail}")

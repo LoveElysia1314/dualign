@@ -105,13 +105,13 @@ def _load_quality_config():
 # ═══════════════════════════════════════════════════════════════
 
 COLUMN_HEADERS = [
-    "Snap",
+    "关系",
     "初始类型",
     "初始评分",
     "当前状态",
     "当前评分",
-    "原文",
-    "译文",
+    "文档 A",
+    "文档 B",
 ]
 
 # 底部面板吸附比例（折叠后展开到 25%，拖拽可到 25%/30%/35%/40%/45%/50%，5% 粒度）
@@ -166,7 +166,16 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._current_entry: Any = None
         self._current_entry_id: str = ""
         self._entries: Optional[List[Any]] = file_entries
-        self._repaired_dir: str = ""
+        self._alignment_path: str = ""
+        self._alignment_file_hash: str = ""
+        self._alignment_file_present: bool = False
+        self._pair_base_state = None
+        self._pair_editing_state = None
+        self._pair_change_set = None
+        self._document_a_id: str = ""
+        self._document_b_id: str = ""
+        self._language_a: str = ""
+        self._language_b: str = ""
         self._align_config = AlignConfig()
         self._strategy: str = "src"
         self._last_open_dir: str = ""
@@ -242,6 +251,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
         self._build_ui()
         self._setup_menu()
+        self._recover_pair_save_transactions()
 
         # 若提供了 file_entries，先让窗口完成首帧绘制，再开始加载首章。
         # 集成方因此不会在 DualignWindow 构造期间同步承担章节 I/O。
@@ -488,7 +498,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._review.prev_chapter_requested.connect(
             lambda: self._workspace.chapter_nav_requested.emit(-1)
         )
-        self._review.doc_promote_requested.connect(self._on_promote)
+        self._review.doc_overwrite_requested.connect(self._on_apply_confirmed_changes)
 
         self._create_dock("review", self._review, "🔧 审校面板", Qt.LeftDockWidgetArea)
         self._create_dock(
@@ -1068,7 +1078,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self._preview_table = QTableWidget()
             self._preview_table.setColumnCount(4)
             self._preview_table.setHorizontalHeaderLabels(
-                ["行", "当前评分", "原文", "译文"]
+                ["行", "当前评分", "文档 A", "文档 B"]
             )
             hdr = self._preview_table.horizontalHeader()
             hdr.setMinimumSectionSize(0)
@@ -1598,18 +1608,22 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         )
         fm.addAction("打开 Demo", self._on_open_demo, QKeySequence("Ctrl+D"))
         fm.addSeparator()
-        fm.addAction("导出修复结果...", self._on_export, QKeySequence.StandardKey.Save)
-        fm.addAction("固化修复...", self._on_promote, QKeySequence("Ctrl+Shift+P"))
+        fm.addAction(
+            "保存工作报告", self._on_save_alignment, QKeySequence.StandardKey.Save
+        )
+        fm.addAction(
+            "覆写源文档...",
+            self._on_apply_confirmed_changes,
+            QKeySequence("Ctrl+Shift+S"),
+        )
         fm.addSeparator()
 
         # ── 查看文件子菜单：快速打开源文件/修复文件/报告 ──
         vm = fm.addMenu("查看文件")
-        vm.addAction("源文件（原文）", self._on_view_source)
-        vm.addAction("源文件（译文）", self._on_view_target)
+        vm.addAction("文档 A", self._on_view_source)
+        vm.addAction("文档 B", self._on_view_target)
         vm.addSeparator()
-        vm.addAction("修复报告", self._on_view_report)
-        vm.addAction("修复后原文", self._on_view_repaired_source)
-        vm.addAction("修复后译文", self._on_view_repaired_target)
+        vm.addAction("工作报告", self._on_view_alignment)
 
         fm.addSeparator()
         fm.addAction("退出", self.close, QKeySequence.StandardKey.Quit)
@@ -1626,12 +1640,12 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         )
         em.addSeparator()
         em.addAction(
-            "重置当前修复",
+            "重置当前校订",
             self._on_reset_current_snap,
             QKeySequence("Ctrl+R"),
         )
         em.addAction(
-            "重置全部修复",
+            "重置全部校订",
             self._on_reset_all,
             QKeySequence("Ctrl+Shift+R"),
         )
@@ -1676,7 +1690,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             QKeySequence("Ctrl+Shift+A"),
         )
         am.addAction(
-            "一键修复异常",
+            "按当前策略自动校订",
             self._on_auto_repair,
             QKeySequence("Ctrl+Shift+F"),
         )
@@ -2146,9 +2160,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
     def _update_doc_summary(self):
         """更新文档摘要。
 
-        row0: 原文：完整文件名（超链接）
-        row1: 译文：完整文件名（超链接）
-        row2: 原文行数 | 译文行数 | Snap均分
+        row0: 文档 A：完整文件名（超链接）
+        row1: 文档 B：完整文件名（超链接）
+        row2: 文档 A 块数 | 文档 B 块数 | 关系均分
         row3: 真锚点率 | 间隙行率 | 合并触顶
         末尾：章节进度
         """
@@ -2202,8 +2216,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         )
 
         self._review.set_summary_cells(
-            f"原文行数：{n_src}",
-            f"译文行数：{n_tgt}",
+            f"文档 A 块数：{n_src}",
+            f"文档 B 块数：{n_tgt}",
             f"Snap均分：{avg_pct}",
             f"真锚点率：{anchor_pct}",
             f"间隙行率：{gap_pct}",

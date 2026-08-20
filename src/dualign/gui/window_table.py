@@ -52,13 +52,13 @@ import dualign.gui.base_table as _color_table  # 主题感知颜色，通过模�
 # ═══════════════════════════════════════════════════════════════
 
 COLUMN_HEADERS = [
-    "Snap",
+    "关系",
     "初始类型",
     "初始评分",
     "当前状态",
     "当前评分",
-    "原文",
-    "译文",
+    "文档 A",
+    "文档 B",
 ]
 
 
@@ -444,7 +444,7 @@ class WindowTableMixin:
         if len(selected_snaps) > 1:
             menu.addSeparator()
             a = menu.addAction(f"⤓ 合并选中 ({len(selected_snaps)} → 1) [M]")
-            a.setToolTip("将多个 snap 捆绑合并为一个文本对，原文和译文均合并")
+            a.setToolTip("旧格式操作：将多个关系合并为一个等行文本对")
             a.triggered.connect(lambda: self.do_bundle_snaps(selected_snaps))
 
         menu.addSeparator()
@@ -521,7 +521,7 @@ class WindowTableMixin:
         if fmt == "markdown":
             # ── 统一单张 Markdown 表格 ──
             md_lines: List[str] = []
-            md_lines.append("| Snap | 类型 | 标记 | 原文 | 译文 |")
+            md_lines.append("| 关系 | 类型 | 标记 | 文档 A | 文档 B |")
             md_lines.append("|---|---|---|---|---|")
             for si in snaps:
                 if si >= len(snap.original_ops):

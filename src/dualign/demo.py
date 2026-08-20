@@ -1,16 +1,10 @@
-"""
-Dualign — Demo 文件加载器
-
-统一的 demo 文件查找入口，供 GUI 欢迎页和 demo_gui.py 共同使用。
-
-用法:
-    from dualign.demo import get_demo_paths
-    src, tgt, label = get_demo_paths()
-"""
+"""Create disposable working copies for the bundled Demo document pair."""
 
 from __future__ import annotations
 
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 
 LABEL = "demo: 与天使相遇"
@@ -37,16 +31,50 @@ def _find_demo_dir() -> Path:
     )
 
 
-def get_demo_paths() -> tuple[str, str, str]:
-    """返回 (src_path, tgt_path, label)
+def get_demo_source_paths() -> tuple[Path, Path]:
+    """Return the immutable, bundled Demo source paths."""
 
-    供 GUI 欢迎页的"体验 Demo"按钮和 demo_gui.py 共同使用。
-    无需缓存隔离——统一使用默认缓存目录，与普通文件对行为一致。
-    """
     root = _find_demo_dir()
-    src = root / "raw" / "sample.source.md"
-    tgt = root / "raw" / "sample.target.md"
-    for p, name in [(src, "原文"), (tgt, "译文")]:
-        if not p.is_file():
-            raise FileNotFoundError(f"Demo {name}文件不存在: {p}")
-    return str(src), str(tgt), LABEL
+    document_a = root / "raw" / "sample.source.md"
+    document_b = root / "raw" / "sample.target.md"
+    for path, name in ((document_a, "文档 A"), (document_b, "文档 B")):
+        if not path.is_file():
+            raise FileNotFoundError(f"Demo {name} 文件不存在: {path}")
+    return document_a, document_b
+
+
+def create_demo_working_pair(
+    work_root: str | Path | None = None,
+) -> tuple[Path, Path, Path]:
+    """Copy the bundled pair into a fresh, writable Demo workspace.
+
+    A unique directory is used for every call, so saving or explicitly
+    overwriting one Demo run can never mutate the bundled examples or affect a
+    later run.  The operating system may clean these temporary workspaces.
+    """
+
+    source_a, source_b = get_demo_source_paths()
+    parent = Path(work_root).resolve() if work_root is not None else None
+    if parent is not None:
+        parent.mkdir(parents=True, exist_ok=True)
+    workspace = Path(
+        tempfile.mkdtemp(
+            prefix="dualign-demo-",
+            dir=str(parent) if parent is not None else None,
+        )
+    )
+    document_a = workspace / source_a.name
+    document_b = workspace / source_b.name
+    shutil.copy2(source_a, document_a)
+    shutil.copy2(source_b, document_b)
+    return document_a, document_b, workspace
+
+
+def get_demo_paths() -> tuple[str, str, str]:
+    """Return a fresh writable pair for the GUI and standalone Demo."""
+
+    document_a, document_b, _workspace = create_demo_working_pair()
+    for path, name in ((document_a, "文档 A"), (document_b, "文档 B")):
+        if not path.is_file():
+            raise FileNotFoundError(f"Demo {name} 副本创建失败: {path}")
+    return str(document_a), str(document_b), f"{LABEL}（临时副本）"

@@ -1,5 +1,5 @@
 """
-Dualign — AiRepairAgent: Tool-Calling 智能校订代理 (v2)
+Dualign — AiRepairAgent: Tool-Calling 智能校订代理
 
 设计原则:
   - 两层文本模型：初始文本（对齐器原始）+ 当前文本（待审校）
@@ -117,7 +117,7 @@ class ChapterContext:
     ) -> "ChapterContext":
         """从 RepairState 构造 ChapterContext。
 
-        v2 设计：当前文本始终设置为 auto-repair 后的结果（无论传入的 state 是否已修复）。
+        当前文本始终设置为 auto-repair 后的结果（无论传入的 state 是否已修复）。
         初始文本保持原始对齐输出。AI 只需判断「当前文本正确吗？」。
         auto-repair 是内部状态，不暴露给 AI。
 
@@ -992,7 +992,7 @@ class MaxTurnsExceeded(Exception):
 
 
 class AiRepairAgent:
-    """Tool-Calling AI 校订代理 (v2)。
+    """Tool-Calling AI 校订代理。
 
     工具: ok / edit / merge / delete / flag / view / append / done
     使用 Responses API 后端，支持 DeepSeek 与本地 Ollama 工具调用。

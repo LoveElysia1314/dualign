@@ -4,6 +4,7 @@ from dualign.gui.window import DualignWindow
 from dualign.gui.dialogs import (
     ConfigDialog,
     BlockEditDialog,
+    ChangeReviewDialog,
     FileListPanel,
 )
 from dualign.gui.review import ReviewController
@@ -30,6 +31,7 @@ __all__ = [
     "DualignWindow",
     "ConfigDialog",
     "BlockEditDialog",
+    "ChangeReviewDialog",
     "FileListPanel",
     "ReviewController",
     "FilterPanel",

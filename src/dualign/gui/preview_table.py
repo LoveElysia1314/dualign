@@ -91,8 +91,8 @@ class SuggestionPreviewTable(BaseTextTable):
         "初始评分",
         "预览状态",
         "预览评分",
-        "原文预览",
-        "译文预览",
+        "文档 A 预览",
+        "文档 B 预览",
     ]
 
     def __init__(self, parent=None):
